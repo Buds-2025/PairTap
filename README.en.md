@@ -1,66 +1,109 @@
-# PairTap — Add quotes and brackets around selected text on Windows
+# PairTap — Wrap Selected Text in Quotes & Brackets on Windows
 
-**PairTap (对符输入)** is a portable Windows tray utility that wraps existing text in matching punctuation with one keyboard shortcut. Select `check later` in a message and turn it into `"check later"`, `“check later”`, or `(check later)` in place.
+**A lightweight Windows shortcut tool to wrap selected text in quotes, brackets, and title marks with a single keystroke.**
 
-[Download PairTap.exe](https://github.com/Buds-2025/PairTap/releases/latest/download/PairTap.exe) · [简体中文](README.md) · [Release notes and SHA-256](https://github.com/Buds-2025/PairTap/releases/latest)
+Select any text in an editor, document, or browser input, press a shortcut, and PairTap places matching punctuation at both ends. For example, select `check later` and press a shortcut to instantly get `“check later”`, `"check later"`, or `(check later)`.
 
-## Quick start
+[Download PairTap.exe (Portable)](https://github.com/Buds-2025/PairTap/releases/latest/download/PairTap.exe) · [简体中文](README.md) · [Release Notes & SHA-256](https://github.com/Buds-2025/PairTap/releases/latest)
 
-1. Run the downloaded `PairTap.exe`. The PairTap icon appears in the Windows system tray.
-2. Select existing text in an editor or web input, then press `Ctrl+Alt+F6` to open the punctuation panel.
-3. Click a pair to add one mark at each end of the selection.
+---
 
-The portable edition runs without installation. It has been tested on Windows 11 x64. The executable is currently unsigned, and the app interface is in Simplified Chinese.
+## Why PairTap Exists
 
-![PairTap's Windows punctuation panel showing quotation marks, brackets, and Chinese book title marks](assets/pairtap-panel.png)
+We've all been there while typing: you've finished typing a phrase or sentence, only to realize you forgot to enclose it in quotes, parentheses, or book title marks.
 
-## Keyboard shortcuts for quotes and brackets
+The traditional workaround is tedious:
+- Either carefully click to place the caret at the start, type the opening mark, then move to the end and type the closing mark;
+- Or cut the selection, type both marks, and paste the text back inside.
 
-On a US keyboard layout, add Ctrl to the keystroke you already use to type the punctuation mark. For example, `Shift+'` types a double quote. `Ctrl+Shift+'` wraps the selection in a pair of double quotes.
+Sure, there are alternatives—like writing a Word macro or using an existing [Quicker "超级对符" (Super Pair)](https://www.getquicker.net/Sharedaction?code=0cf35569-18d3-4ac6-99bf-08dcff9008ea) action. But macros only work within a specific app, and Quicker requires keeping a bulky runtime running. Now that we have AI coding assistants, I decided to build my own: a dead-simple, standalone, native Windows tool. Zero setup, portable single-executable, one keystroke to get it done.
 
-| Selection | Default shortcut | Chinese punctuation | Half-width punctuation |
-| --- | --- | --- | --- |
+---
+
+## Key Features
+
+- **One-Keystroke Wrapping**: Select text and press a shortcut—no manual cursor positioning or copy-pasting.
+- **Intuitive Shortcuts**: Press the key you usually use to type the mark, plus `Ctrl` (e.g. `'` types a quote, `Ctrl+'` wraps in single quotes; `Shift+'` types a double quote, `Ctrl+Shift+'` wraps in double quotes).
+- **Ultra Lightweight**: Single portable `.exe` under 100KB, native .NET, near-zero memory footprint, runs from the tray without installation.
+- **Clipboard Protection**: When falling back to clipboard-based replacement, PairTap **automatically backs up and restores your clipboard**, never losing your existing copied content.
+- **23-Pair Visual Panel**: Press `Ctrl+Alt+F6` anytime to pop up a clean panel covering quotation marks, brackets, book title marks, and half-width symbols.
+- **Offline & Private**: No network calls, no telemetry, no admin privileges required.
+
+---
+
+## Quick Start (30 Seconds)
+
+1. **Download & Run**: Download [`PairTap.exe`](https://github.com/Buds-2025/PairTap/releases/latest/download/PairTap.exe) and double-click to run. The PairTap icon appears in your system tray.
+2. **Select Text**: Highlight any text in your editor, document, or browser input.
+3. **Wrap**:
+   - **Via Shortcut**: Press `Ctrl+Shift+'` to wrap in `“selected text”`.
+   - **Via Panel**: Press `Ctrl+Alt+F6` to pop up the punctuation palette, then click your desired pair.
+
+![PairTap punctuation panel on Windows](assets/pairtap-panel.png)
+
+---
+
+## Default Shortcuts
+
+On standard US keyboard layouts, the most common pairs have direct global shortcuts:
+
+| Selection | Default Shortcut | Chinese Punctuation | Half-Width Punctuation |
+| :--- | :--- | :--- | :--- |
 | check later | `Ctrl+Shift+'` | `“check later”` | `"check later"` |
 | original | `Ctrl+'` | `‘original’` | `'original'` |
 | optional | `Ctrl+Shift+9` or `Ctrl+Shift+0` | `（optional）` | `(optional)` |
 | pending | `Ctrl+[` or `Ctrl+]` | `【pending】` | `[pending]` |
 | note | `Ctrl+Shift+[` or `Ctrl+Shift+]` | `「note」` | `{note}` |
-| 小王子 | `Ctrl+Shift+,` or `Ctrl+Shift+.` | `《小王子》` | `<小王子>` |
+| The Little Prince | `Ctrl+Shift+,` or `Ctrl+Shift+.` | `《The Little Prince》` | `<The Little Prince>` |
 
-The punctuation panel contains **23 pairs**.
+> **Tip**: Press `Ctrl+Alt+F6` to open the panel and choose from all **23 matching pairs**.
 
-| Category | Available pairs |
-| --- | --- |
-| Quotation marks | `“ ”`, `‘ ’`, `「 」`, `『 』`, `« »`, `‹ ›`, `＂ ＂`, `＇ ＇` |
-| Chinese brackets and book title marks | `（ ）`, `【 】`, `〖 〗`, `〔 〕`, `《 》`, `〈 〉`, `［ ］`, `｛ ｝`, `＜ ＞` |
-| Half-width punctuation | `( )`, `[ ]`, `{ }`, `< >`, `" "`, `' '` |
+### Supported Punctuation Pairs (23 Pairs)
+
+| Category | Supported Pairs |
+| :--- | :--- |
+| **Quotation Marks** | `“ ”`, `‘ ’`, `「 」`, `『 』`, `« »`, `‹ ›`, `＂ ＂`, `＇ ＇` |
+| **Chinese Brackets & Title Marks** | `（ ）`, `【 】`, `〖 〗`, `〔 〕`, `《 》`, `〈 〉`, `［ ］`, `｛ ｝`, `＜ ＞` |
+| **Half-Width Punctuation** | `( )`, `[ ]`, `{ }`, `< >`, `" "`, `' '` |
+
+---
 
 ## FAQ
 
-### How do I always get the same quotation marks or change a shortcut?
+### Q: Does it work in Word, browsers, WeChat, or code editors?
+**Yes.**
+PairTap employs a dual-engine approach:
+- **Standard text controls** (Notepad, standard edit controls): Directly replaced via Win32 API in memory, instant and without touching the clipboard.
+- **Modern complex applications** (Chrome/Edge, Word, WeChat, etc.): Handled via UI Automation and input simulation.
+*Note: In rich-text editors (like formatted text in Word), wrapping replaces text with plain text, so internal formatting (bold/color) inside the selection may revert to plain text. Password fields and elevated admin windows may be restricted by Windows security policies.*
 
-Open **快捷键设置** (Shortcut Settings) from the tray menu or the bottom right of the panel. You can bind a shortcut to a specific pair, change or clear a binding, or restore the defaults. Preferences are stored for the current Windows user and carry over when you replace the portable executable.
+### Q: Will it overwrite my clipboard?
+**No.**
+When PairTap uses the clipboard as a fallback, it automatically backs up your existing clipboard contents first and restores them right after wrapping. Your previously copied code, text, or images stay intact.
 
-Direct shortcuts use the keyboard layout and input method state exposed by Windows. Microsoft Pinyin's separate Chinese/English punctuation switch may change without an update to the state Windows reports. Choose a fixed Chinese, half-width, or full-width style, or bind a shortcut to the exact pair you want. If a shortcut conflicts with an existing app command, reassign it in PairTap.
+### Q: How do I choose between Chinese quotes (`“ ”`) and ASCII quotes (`" "`)?
+By default, PairTap detects your Windows input method status.
+If you always want Chinese quotation marks regardless of input method mode:
+- Right-click the tray icon and select "快捷键设置" (Shortcut Settings), or open settings from the panel.
+- Check "固定中文标点" (Force Chinese Punctuation), or bind a dedicated shortcut directly to `“ ”`.
 
-### Does it work in Word or a browser? Does it preserve formatting?
+### Q: What if a shortcut conflicts with another app?
+Open Shortcut Settings from the tray icon or the bottom-right of the panel. You can customize any keybinding, clear bindings you don't need, or reset to defaults. Settings are saved per-user in the registry and persist across updates.
 
-PairTap has been tested with native text fields and Chrome web inputs on Windows 11 x64. Support in Word and other editors depends on whether the active field exposes a verifiable editable selection and allows plain-text copy and paste. To check a particular field, select a short sample and try a pair from the panel.
+### Q: How does it compare to Word macros or Quicker?
+- **vs. Word Macros**: PairTap is a system-wide global tool—it works everywhere, not just Word (browsers, chat apps, Markdown editors, spreadsheets, web forms).
+- **vs. Quicker Actions**: No need to install and run the Quicker client environment. PairTap is zero-dependency, standalone, under 100KB, portable, and instant.
 
-PairTap can edit standard Windows text fields directly. Other fields may use the clipboard path, which **can strip rich formatting such as bold or color inside the selection**. Password fields, read-only fields, and elevated windows may be restricted. PairTap stops if it cannot safely back up the clipboard contents.
+---
 
-### How do I switch from the old installer to the portable edition?
+## Build from Source & Feedback
 
-Quit the running copy from the tray, then open the downloaded `PairTap.exe`. To remove the old installation, uninstall it from **Settings → Apps → Installed apps** before starting the portable copy.
+PairTap is built with native C# and .NET Framework without needing heavy build toolchains.
 
-## Why PairTap exists
+On Windows 11 / 10, simply run the PowerShell script from the repository root:
+```powershell
+.\Build.ps1
+```
+The script calls the built-in .NET Framework compiler and outputs `dist\PairTap.exe`.
 
-Typing a pair of quotes before writing is easy. Adding quotes to text that is already there usually means moving the caret to both ends, or cutting the text and pasting it back between the marks. That comes up in documents, forms, and messages.
-
-Word macros can help in some cases, and Quicker offers a punctuation pairing action called 超级对符. With AI available, I wanted to try building a small Windows utility of my own and make the whole operation a single keystroke. [Quicker's 超级对符 action](https://www.getquicker.net/Sharedaction?code=0cf35569-18d3-4ac6-99bf-08dcff9008ea)
-
-## Build and report issues
-
-On Windows 11 x64, run `.\Build.ps1` from the repository root. The script uses the .NET Framework compiler on Windows and produces `dist\PairTap.exe` by default.
-
-When reporting an issue, include your Windows version, target app, input method, shortcut, and the expected and actual text. [Report an issue](https://github.com/Buds-2025/PairTap/issues/new)
+Questions or suggestions? Feel free to [Open an Issue](https://github.com/Buds-2025/PairTap/issues/new).
