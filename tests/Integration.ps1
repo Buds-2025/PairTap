@@ -419,6 +419,9 @@ try {
 <!doctype html><meta charset="utf-8"><title>PairTap browser fixture ready</title>
 <style>textarea { width: calc(100% - 32px); height: 320px; margin: 12px; font-size: 26px; }</style>
 <textarea id="editor">甲中英混排乙</textarea>
+<input id="locked" value="只读选区" readonly>
+<div id="rich" contenteditable="true"><p>甲<span>富文本AbC</span>乙</p></div>
+<div id="multi" contenteditable="true"><p>甲文本</p><p>AbC乙</p></div>
 <script>
 const editor = document.getElementById('editor');
 editor.addEventListener('mouseup', () => {
@@ -436,13 +439,54 @@ editor.addEventListener('input', () => {
         ? 'PairTap browser fixture passed'
         : 'PairTap browser fixture mismatch: ' + editor.value;
 });
+const locked = document.getElementById('locked');
+locked.addEventListener('focus', () => {
+    locked.select();
+    document.title = 'PairTap readonly selected';
+});
+for (const event of ['copy', 'paste', 'input']) {
+    locked.addEventListener(event, () => { document.title = 'PairTap readonly unexpectedly received ' + event; });
+}
+const rich = document.getElementById('rich');
+rich.addEventListener('focus', () => {
+    const text = rich.querySelector('span').firstChild;
+    const range = document.createRange();
+    range.setStart(text, 1);
+    range.setEnd(text, 5);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    document.title = 'PairTap rich selection ready';
+});
+rich.addEventListener('input', () => {
+    document.title = ['甲富《文本Ab》C乙', '甲富<文本Ab>C乙', '甲富＜文本Ab＞C乙'].includes(rich.textContent)
+        ? 'PairTap rich selection passed'
+        : 'PairTap rich selection mismatch: ' + rich.textContent;
+});
+const multi = document.getElementById('multi');
+multi.addEventListener('focus', () => {
+    const range = document.createRange();
+    range.setStart(multi.firstChild.firstChild, 1);
+    range.setEnd(multi.lastChild.firstChild, 2);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    document.title = 'PairTap multiline selection ready';
+});
+multi.addEventListener('input', () => {
+    document.title = ['甲《文本Ab》C乙', '甲<文本Ab>C乙', '甲＜文本Ab＞C乙'].includes(multi.textContent)
+        ? 'PairTap multiline selection passed'
+        : 'PairTap multiline selection mismatch';
+});
 </script>
 '@ | Set-Content -LiteralPath $page -Encoding UTF8
-        $browser = Start-Process -FilePath $chrome -PassThru -ArgumentList @(
+        $browserArguments = @(
             ('--user-data-dir="' + (Join-Path $fixture 'profile') + '"'),
             '--no-first-run', '--disable-sync', '--disable-background-networking',
             '--new-window', ('"' + ([Uri]$page).AbsoluteUri + '"')
         )
+        if ($env:PAIRTAP_TEST_BROWSER_IA2) {
+            $browserArguments = @('--disable-features=UiaProvider', '--force-renderer-accessibility=complete') + $browserArguments
+        }
+        $browser = Start-Process -FilePath $chrome -PassThru -ArgumentList $browserArguments
         try {
             for ($i = 0; $i -lt 32; $i++) {
                 Pump 250
@@ -479,6 +523,27 @@ editor.addEventListener('input', () => {
                 $browser.Refresh()
                 Assert ($browser.MainWindowTitle -like 'PairTap browser fixture passed*') 'empty browser selection does not trigger copy-line behavior'
                 Assert ([Windows.Forms.Clipboard]::GetText() -ceq 'Clipboard fixture') 'empty browser selection never replaces the clipboard'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'PairTap readonly selected*' } 1000) 'browser read-only field has a real selection'
+                $sequence = $sequenceMethod.Invoke($null, @())
+                [TestKeys]::Symbol(0xBC)
+                Pump 950
+                $browser.Refresh()
+                Assert ($browser.MainWindowTitle -like 'PairTap readonly selected*') 'browser read-only selection receives no copy or paste'
+                Assert ($sequenceMethod.Invoke($null, @()) -eq $sequence) 'browser read-only selection leaves the clipboard untouched'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'PairTap rich selection ready*' } 1000) 'browser rich editor selects a partial text node'
+                [TestKeys]::Symbol(0xBC)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'PairTap rich selection passed*' } 2000) "browser rich editor wraps only the selected substring (actual $($browser.MainWindowTitle))"
+                Assert (Wait-Condition { [Windows.Forms.Clipboard]::GetText() -ceq 'Clipboard fixture' } 1300) 'browser rich editor restores the clipboard'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'PairTap multiline selection ready*' } 1000) 'browser rich selection spans two paragraphs'
+                [TestKeys]::Symbol(0xBC)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'PairTap multiline selection passed*' } 2000) "browser wraps across paragraphs (actual $($browser.MainWindowTitle))"
+                Assert (Wait-Condition { [Windows.Forms.Clipboard]::GetText() -ceq 'Clipboard fixture' } 1300) 'browser multiline editor restores the clipboard'
             }
         }
         finally {

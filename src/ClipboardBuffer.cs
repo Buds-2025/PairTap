@@ -192,13 +192,14 @@ namespace PairTap
             finally { GlobalUnlock(source); }
         }
 
-        internal static string ReadSelection(ClipboardStamp copied, Target target, out ClipboardStamp read)
+        internal static string ReadSelection(ClipboardStamp copied, bool allowSameOwnerUpdate, out ClipboardStamp read)
         {
             read = copied;
             if (!Open(IntPtr.Zero)) return null;
             try
             {
-                if (!copied.IsCurrent || copied.Owner == IntPtr.Zero || Native.ProcessId(copied.Owner) != target.ProcessId)
+                ClipboardStamp current = ClipboardStamp.Current;
+                if (current.Owner != copied.Owner || (current.Sequence != copied.Sequence && !allowSameOwnerUpdate))
                     return null;
                 IntPtr data = GetClipboardData(UnicodeFormat);
                 read = ClipboardStamp.Current;

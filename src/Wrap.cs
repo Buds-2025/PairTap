@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.ExceptionServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Automation;
@@ -25,6 +26,8 @@ namespace PairTap
     internal static class Wrap
     {
         internal const string NoSelection = "请先选中要包裹的文字。";
+        private const string UnavailableSelection = "当前控件未提供可核验的选区。";
+        private const string ReadOnlySelection = "当前选区为只读或包含受保护内容。";
         private static int probing;
 
         internal static async Task<string> Apply(Target target, Pair pair, ClipboardChannel channel)
@@ -77,10 +80,12 @@ namespace PairTap
         private sealed class Selection
         {
             internal string Error, Text;
-            internal AutomationElement Element;
+            internal AutomationElement Element, Provider;
             internal TextPatternRange Range;
             internal ValuePattern Value;
             internal string OriginalValue;
+            internal AccessibleSelection Accessible;
+            internal bool VerifiedWritable;
         }
 
         private static async Task<Selection> Probe(Target target, Selection previous)
@@ -89,17 +94,25 @@ namespace PairTap
                 return new Selection { Error = "输入控件暂未响应，无法确认选区。" };
             Task<Selection> work = Task.Run(() =>
             {
-                try { return CheckSelection(target, previous); }
+                try
+                {
+                    if (previous != null && previous.Accessible != null)
+                        return CheckAccessibleSelection(target, previous);
+                    Selection result = CheckSelection(target, previous);
+                    if (previous == null && result.Error == UnavailableSelection)
+                        return CheckAccessibleSelection(target, null);
+                    return result;
+                }
                 finally { Interlocked.Exchange(ref probing, 0); }
             });
-            if (await Task.WhenAny(work, Task.Delay(450)) != work)
+            if (await Task.WhenAny(work, Task.Delay(800)) != work)
                 return new Selection { Error = "输入控件暂未响应，无法确认选区。" };
             return await work;
         }
 
         private static Selection CheckSelection(Target target, Selection previous)
         {
-            var result = new Selection { Error = "当前控件未提供可核验的选区。" };
+            var result = new Selection { Error = UnavailableSelection };
             try
             {
                 if (!target.IsCurrent) return result;
@@ -107,27 +120,53 @@ namespace PairTap
                 if (element == null) return result;
                 if (element.Current.IsPassword || !element.Current.IsEnabled)
                     return new Selection { Error = "当前输入框不支持包裹选区。" };
-                object value;
-                var valuePattern = element.TryGetCurrentPattern(ValuePattern.Pattern, out value) ? (ValuePattern)value : null;
-                if (valuePattern != null && valuePattern.Current.IsReadOnly)
-                    return new Selection { Error = "当前输入框为只读。" };
-                object text;
-                if (!element.TryGetCurrentPattern(TextPattern.Pattern, out text)) return result;
+                AutomationElement provider = element;
+                TextPattern textPattern = null;
+                for (int i = 0; i < 8 && provider != null && provider.Current.ProcessId == element.Current.ProcessId; i++)
+                {
+                    object pattern;
+                    if (provider.TryGetCurrentPattern(TextPattern.Pattern, out pattern))
+                    {
+                        textPattern = (TextPattern)pattern;
+                        break;
+                    }
+                    provider = TreeWalker.RawViewWalker.GetParent(provider);
+                }
+                if (textPattern == null) return result;
 
-                var ranges = ((TextPattern)text).GetSelection();
+                var ranges = textPattern.GetSelection();
                 if (ranges.Length > 1) return new Selection { Error = "请选择一段连续文字。" };
                 if (ranges.Length == 0 || ranges[0].CompareEndpoints(TextPatternRangeEndpoint.Start,
                     ranges[0], TextPatternRangeEndpoint.End) == 0)
-                    return new Selection { Error = NoSelection };
+                    return element.Current.ControlType == ControlType.Edit ?
+                        new Selection { Error = NoSelection } : result;
 
                 TextPatternRange range = ranges[0];
+                object readOnly = range.GetAttributeValue(TextPattern.IsReadOnlyAttribute);
+                object value;
+                bool focusedEdit = element.Current.ControlType == ControlType.Edit;
+                var valuePattern = focusedEdit && element.TryGetCurrentPattern(ValuePattern.Pattern, out value) ?
+                    (ValuePattern)value : null;
+                bool writableValue = valuePattern != null && !valuePattern.Current.IsReadOnly;
+                if (!provider.Equals(element) && !SelectionBelongsToFocus(range, element))
+                    return result;
+                if (Equals(readOnly, true) || readOnly == TextPattern.MixedAttributeValue ||
+                    (!Equals(readOnly, false) && valuePattern != null && !writableValue))
+                    return focusedEdit ? new Selection { Error = ReadOnlySelection } : result;
+                bool verifiedWritable = Equals(readOnly, false) || writableValue;
+                if (!focusedEdit && !verifiedWritable) return result;
+
                 string selected = range.GetText(2 * 1024 * 1024 + 1);
                 if (string.IsNullOrEmpty(selected) || selected.Length > 2 * 1024 * 1024) return result;
-                if (previous != null && (!element.Equals(previous.Element) || !range.Compare(previous.Range) ||
+                if (previous != null && (!element.Equals(previous.Element) || !provider.Equals(previous.Provider) ||
+                    !range.Compare(previous.Range) ||
                     !SameText(selected, previous.Text)))
                     return new Selection { Error = "选区已变化，请重新选中文字。" };
-                var verified = new Selection { Element = element, Range = range, Text = selected };
-                if (previous == null && valuePattern != null)
+                var verified = new Selection
+                {
+                    Element = element, Provider = provider, Range = range, Text = selected, VerifiedWritable = verifiedWritable
+                };
+                if (previous == null && writableValue)
                 {
                     string field = valuePattern.Current.Value;
                     if (field != null && field.Length <= 64 * 1024)
@@ -138,10 +177,38 @@ namespace PairTap
                 }
                 return verified;
             }
-            catch (System.Runtime.InteropServices.COMException) { }
-            catch (InvalidOperationException) { }
-            catch (ArgumentException) { }
+            catch (System.Runtime.InteropServices.COMException error) { Diagnostics.Failure("selection_provider", error); }
+            catch (InvalidOperationException error) { Diagnostics.Failure("selection_provider", error); }
+            catch (ArgumentException error) { Diagnostics.Failure("selection_provider", error); }
             return result;
+        }
+
+        private static Selection CheckAccessibleSelection(Target target, Selection previous)
+        {
+            AccessibleSelection selected = AccessibleSelection.Read(target);
+            if (previous != null && (selected == null || !selected.SameRange(previous.Accessible) ||
+                !SameText(selected.Text, previous.Text)))
+                return new Selection { Error = "选区已变化，请重新选中文字。" };
+            if (selected == null) return new Selection { Error = UnavailableSelection };
+            string value = previous == null ? selected.ReadValue() : null;
+            return new Selection
+            {
+                Text = selected.Text,
+                Accessible = selected,
+                VerifiedWritable = true,
+                OriginalValue = value != null && value.Length <= 64 * 1024 ? value : null
+            };
+        }
+
+        private static bool SelectionBelongsToFocus(TextPatternRange range, AutomationElement focused)
+        {
+            AutomationElement enclosing = range.GetEnclosingElement();
+            for (int i = 0; i < 8 && enclosing != null; i++)
+            {
+                if (enclosing.Equals(focused)) return true;
+                enclosing = TreeWalker.RawViewWalker.GetParent(enclosing);
+            }
+            return false;
         }
 
         private static bool SameText(string left, string right)
@@ -200,15 +267,27 @@ namespace PairTap
             finally { channel.StopWatching(); }
 
             ClipboardStamp copied = change.Value;
-            if (copied.Owner == IntPtr.Zero || Native.ProcessId(copied.Owner) != target.ProcessId)
+            bool ownerless = copied.Owner == IntPtr.Zero;
+            if (ownerless ? verified == null || !verified.VerifiedWritable : Native.ProcessId(copied.Owner) != target.ProcessId)
                 return "剪贴板已由其他应用更新，请重试。";
-            transfer.Stamp = copied;
+            if (!ownerless) transfer.Stamp = copied;
 
             ClipboardStamp read = copied;
-            string selected = await Task.Run(() => ClipboardBuffer.ReadSelection(copied, target, out read));
-            transfer.Stamp = read;
+            bool canRetryCopy = verified != null && !ownerless;
+            string selected = await Task.Run(() => ClipboardBuffer.ReadSelection(copied, canRetryCopy, out read));
+            // Some clipboard providers announce a change before their final text format is available.
+            for (int retry = 0; selected == null && canRetryCopy && retry < 2 &&
+                target.IsCurrent && ClipboardBuffer.GetClipboardOwner() == copied.Owner; retry++)
+            {
+                await Task.Delay(25);
+                selected = await Task.Run(() => ClipboardBuffer.ReadSelection(copied, true, out read));
+            }
+            if (!ownerless && !canRetryCopy && read.Owner == copied.Owner) transfer.Stamp = read;
             if (string.IsNullOrEmpty(selected)) return "当前选区没有可包裹的纯文本，或复制内容超过上限。";
-            if (verified != null && !SameText(selected, verified.Text)) return "复制内容与选区不一致，请重试。";
+            if (verified != null && !SameCopiedText(selected, verified.Text, ownerless))
+                return "复制内容与选区不一致，请重试。";
+            // An ownerless or later clipboard update is accepted only after its contents match the selection.
+            transfer.Stamp = read;
 
             if (!target.IsCurrent || Native.ModifiersDown)
                 return "输入焦点或选区已变化，请重试。";
@@ -223,6 +302,7 @@ namespace PairTap
             {
                 Selection current = await Probe(target, verified);
                 if (current.Error != null) return current.Error;
+                if (ownerless && !current.VerifiedWritable) return "当前无法确认选区可编辑。";
             }
             if (positions.HasValue && (!Native.CanEdit(target.Focus) || Native.EditSelection(target.Focus) != positions))
                 return "输入焦点或选区已变化，请重试。";
@@ -238,12 +318,21 @@ namespace PairTap
             string expected = ExpectedValue(verified, replacement);
             if (expected != null && Interlocked.CompareExchange(ref probing, 1, 0) == 0)
             {
-                Task<bool> confirmed = VerifyPaste(target, verified.Value, expected, deadline);
+                Task<bool> confirmed = VerifyPaste(target, verified, expected, deadline);
                 if (await Task.WhenAny(confirmed, deadline) != confirmed || !await confirmed)
                     return "当前窗口未确认完整替换，请检查选区。";
             }
-            else if (!await received) await deadline;
+            else if (verified != null || !await received) await deadline;
             return null;
+        }
+
+        private static bool SameCopiedText(string copied, string verified, bool ownerless)
+        {
+            if (SameText(copied, verified)) return true;
+            // HTML paragraph boundaries can be one break in the provider and two on the clipboard.
+            // Only permit this difference for a copy attributed to the target process.
+            return !ownerless && string.Equals(Regex.Replace(copied, "[\r\n]+", "\n"),
+                Regex.Replace(verified, "[\r\n]+", "\n"), StringComparison.Ordinal);
         }
 
         private static string ExpectedValue(Selection selection, string replacement)
@@ -255,7 +344,7 @@ namespace PairTap
             return value.Substring(0, start) + replacement + value.Substring(start + selection.Text.Length);
         }
 
-        private static async Task<bool> VerifyPaste(Target target, ValuePattern value, string expected, Task deadline)
+        private static async Task<bool> VerifyPaste(Target target, Selection selection, string expected, Task deadline)
         {
             try
             {
@@ -263,7 +352,8 @@ namespace PairTap
                 {
                     while (!deadline.IsCompleted && target.IsCurrent)
                     {
-                        if (SameText(value.Current.Value, expected)) return true;
+                        string value = selection.Accessible == null ? selection.Value.Current.Value : selection.Accessible.ReadValue();
+                        if (SameText(value, expected)) return true;
                         await Task.Delay(30).ConfigureAwait(false);
                     }
                     return false;
