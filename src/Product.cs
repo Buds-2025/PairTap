@@ -5,7 +5,7 @@ namespace PairTap
         internal const string Name = "PairTap";
         internal const string ChineseName = "对符输入";
         internal const string DisplayName = ChineseName + " · " + Name;
-        internal const string Version = "1.3.2.0";
+        internal const string Version = "1.3.3.0";
         internal const string SettingsKey = @"Software\" + Name;
         internal const string InstanceName = @"Local\" + Name + ".63BA74EF";
         internal const string ExitEventName = @"Local\" + Name + ".Exit.63BA74EF";

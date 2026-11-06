@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -52,6 +53,7 @@ namespace PairTap
 
         internal TrayApp()
         {
+            Diagnostics.Write("startup version=" + Product.Version);
             hotkeys = new HotkeyWindow(HandleHotkey);
             clipboard = new ClipboardChannel();
             using (var source = Assembly.GetExecutingAssembly().GetManifestResourceStream("brand"))
@@ -108,9 +110,10 @@ namespace PairTap
             for (int i = 0; i < keys.Length; i++)
             {
                 Keys binding = keys[i];
-                if (binding != Keys.None && Native.RegisterHotKey(hotkeys.Handle, i + 1,
-                    ShortcutSettings.NativeModifiers(binding), (uint)(binding & Keys.KeyCode)))
-                    available.Add(i + 1);
+                if (binding == Keys.None) continue;
+                if (Native.RegisterHotKey(hotkeys.Handle, i + 1, ShortcutSettings.NativeModifiers(binding),
+                    (uint)(binding & Keys.KeyCode))) available.Add(i + 1);
+                else Diagnostics.Write("hotkey_registration_failed id=" + Shortcut.All[i].Id);
             }
         }
 
@@ -270,6 +273,9 @@ namespace PairTap
         private async void Apply(Target target, Pair pair, bool returningFromPalette = false)
         {
             busy = true;
+            var elapsed = Stopwatch.StartNew();
+            string control = Native.ClassName(target.Focus);
+            string context = "wrap pid=" + target.ProcessId + " control=" + control + " pair=" + pair.Name;
             try
             {
                 if (returningFromPalette)
@@ -278,11 +284,12 @@ namespace PairTap
                         await Task.Delay(20);
                 }
                 string message = await Wrap.Apply(target, pair, clipboard);
-                if (message != null && message != "请先选中要包裹的文字。") Notify(message);
+                Diagnostics.Write(context + " ms=" + elapsed.ElapsedMilliseconds + " result=" + (message ?? "ok"));
+                if (message != null && message != Wrap.NoSelection) Notify(message);
             }
-            catch (InvalidOperationException error) { Notify(error.Message); }
-            catch (ExternalException) { Notify("当前窗口或剪贴板暂时不可用，请重新选中后重试。"); }
-            catch (Exception) { Notify("这个选区暂时无法处理。请选中普通文字后重试。"); }
+            catch (InvalidOperationException error) { Diagnostics.Failure(context, error); Notify(error.Message); }
+            catch (ExternalException error) { Diagnostics.Failure(context, error); Notify("当前窗口或剪贴板暂时不可用，请重新选中后重试。"); }
+            catch (Exception error) { Diagnostics.Failure(context, error); Notify("这个选区暂时无法处理。请选中普通文字后重试。"); }
             finally
             {
                 busy = false;

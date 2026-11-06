@@ -9,7 +9,7 @@ Wrap selected text in matching quotes, brackets, and title marks with a single s
 ## How to Use
 
 1. **Run**: Download and run `PairTap.exe` (portable single-file, sits in the system tray).
-2. **Select**: Highlight any text in your editor, document, or browser input.
+2. **Select**: Highlight text in an editable area in Word, a text editor, or a browser.
 3. **Wrap**:
    - Press a **shortcut** (e.g. `Ctrl+Shift+'` for double quotes);
    - Or press `Ctrl+Alt+F6` to pick a pair from the visual panel.
@@ -34,3 +34,5 @@ Add `Ctrl` to your normal punctuation keystroke to wrap the selected text:
 > **Tips**:
 > - Press `Ctrl+Alt+F6` to choose from all 23 matching pairs.
 > - Right-click the tray icon to customize shortcuts or lock output to Chinese marks.
+> - In Word documents and tables, PairTap inserts delimiters around the selection, preserving its formatting. A single undo removes both delimiters.
+> - The runtime log at `%LOCALAPPDATA%\PairTap\Logs\runtime.log` records operation status, timing, and error codes.

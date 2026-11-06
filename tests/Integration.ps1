@@ -137,6 +137,13 @@ function Wait-Condition([scriptblock]$condition, [int]$timeout) {
     return $false
 }
 function Assert($ok, $message) { if (!$ok) { throw $message }; Write-Output "PASS $message" }
+$assembly = [Reflection.Assembly]::LoadFile($env:PAIRTAP_TEST_EXE)
+$bufferType = $assembly.GetType('PairTap.ClipboardBuffer')
+$sequenceMethod = $bufferType.GetMethod('GetClipboardSequenceNumber',[Reflection.BindingFlags]'Static,NonPublic')
+if ($env:PAIRTAP_TEST_WORD) {
+    & (Join-Path $PSScriptRoot 'Word.ps1')
+    return
+}
 $form = New-Object Windows.Forms.Form
 $form.Text = 'PairTap integration fixture'
 $form.Width = 500
@@ -151,14 +158,11 @@ $form.Activate()
 [TestKeys]::Focus($form.Handle)
 [void]$edit.Focus()
 Pump 100
-$assembly = [Reflection.Assembly]::LoadFile($env:PAIRTAP_TEST_EXE)
-$bufferType = $assembly.GetType('PairTap.ClipboardBuffer')
 $flags = [Reflection.BindingFlags]'Instance,NonPublic'
 $backup = $bufferType.GetConstructors($flags)[0].Invoke(@($form.Handle))
 $task = $bufferType.GetMethod('Capture',$flags).Invoke($backup,@())
 while (!$task.IsCompleted) { Pump 30 }
 [void]$task.GetAwaiter().GetResult()
-$sequenceMethod = $bufferType.GetMethod('GetClipboardSequenceNumber',[Reflection.BindingFlags]'Static,NonPublic')
 try {
     $data = New-Object Windows.Forms.DataObject
     $data.SetData([Windows.Forms.DataFormats]::UnicodeText, 'Clipboard fixture')

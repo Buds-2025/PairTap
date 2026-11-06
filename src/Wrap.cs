@@ -24,7 +24,7 @@ namespace PairTap
 
     internal static class Wrap
     {
-        private const string NoSelection = "请先选中要包裹的文字。";
+        internal const string NoSelection = "请先选中要包裹的文字。";
         private static int probing;
 
         internal static async Task<string> Apply(Target target, Pair pair, ClipboardChannel channel)
@@ -34,6 +34,8 @@ namespace PairTap
             if (!target.IsCurrent) return "输入焦点已变化，请重新选中文字。";
 
             string className = Native.ClassName(target.Focus);
+            if (className == "_WwG") return await WordSelection.Apply(target, pair);
+
             string rootClass = Native.ClassName(target.Window);
             if (rootClass == "ConsoleWindowClass" || rootClass == "CASCADIA_HOSTING_WINDOW_CLASS")
                 return "当前窗口是终端，请在文本编辑器中使用。";
@@ -53,7 +55,9 @@ namespace PairTap
                     {
                         if (!Native.EditAllowsLength(target.Focus, text.Length + pair.Left.Length + pair.Right.Length))
                             return "当前输入框没有足够空间加入两侧标点。";
-                        if (!target.IsCurrent || !Native.CanEdit(target.Focus) || Native.EditSelection(target.Focus) != positions)
+                        if (!target.IsCurrent || !Native.CanEdit(target.Focus) ||
+                            !string.Equals(Native.ReadEditText(target.Focus), text, StringComparison.Ordinal) ||
+                            Native.EditSelection(target.Focus) != positions || !target.IsCurrent || Native.ModifiersDown)
                             return "选区已变化，请重新选中文字。";
                         string replacement = pair.Left + text.Substring(start, end - start) + pair.Right;
                         return Native.ReplaceEditSelection(target.Focus, replacement) ? null : "当前输入框无法替换选区。";
@@ -204,15 +208,9 @@ namespace PairTap
             string selected = await Task.Run(() => ClipboardBuffer.ReadSelection(copied, target, out read));
             transfer.Stamp = read;
             if (string.IsNullOrEmpty(selected)) return "当前选区没有可包裹的纯文本，或复制内容超过上限。";
-            if (verified != null)
-            {
-                if (!SameText(selected, verified.Text)) return "复制内容与选区不一致，请重试。";
-                Selection current = await Probe(target, verified);
-                if (current.Error != null) return current.Error;
-            }
+            if (verified != null && !SameText(selected, verified.Text)) return "复制内容与选区不一致，请重试。";
 
-            if (!target.IsCurrent || Native.ModifiersDown ||
-                (positions.HasValue && (!Native.CanEdit(target.Focus) || Native.EditSelection(target.Focus) != positions)))
+            if (!target.IsCurrent || Native.ModifiersDown)
                 return "输入焦点或选区已变化，请重试。";
             string replacement = pair.Left + selected + pair.Right;
             Task<bool> received = ClipboardBuffer.PreparePaste(target, replacement, channel);
@@ -221,6 +219,15 @@ namespace PairTap
             finally { transfer.OwnsPaste = ClipboardBuffer.GetClipboardOwner() == channel.Handle; }
             if (!staged || !target.IsCurrent || Native.ModifiersDown || ClipboardBuffer.GetClipboardOwner() != channel.Handle)
                 return "无法安全替换当前选区，请重试。";
+            if (verified != null)
+            {
+                Selection current = await Probe(target, verified);
+                if (current.Error != null) return current.Error;
+            }
+            if (positions.HasValue && (!Native.CanEdit(target.Focus) || Native.EditSelection(target.Focus) != positions))
+                return "输入焦点或选区已变化，请重试。";
+            if (!target.IsCurrent || Native.ModifiersDown || ClipboardBuffer.GetClipboardOwner() != channel.Handle)
+                return "输入焦点或剪贴板已变化，请重试。";
             channel.Dispatching();
             if (!Native.ControlKey(Keys.V)) return "无法向当前窗口发送粘贴。";
 
