@@ -187,21 +187,21 @@ namespace PairTap
         private static async Task<string> CopyAndPaste(Target target, Pair pair, ClipboardChannel channel,
             ClipboardBuffer backup, Transfer transfer, ulong? positions, Selection verified)
         {
-            Task<bool> changed = channel.WatchCopy();
+            Task<ClipboardStamp?> changed = channel.WatchCopy(backup.Original);
+            ClipboardStamp? change;
             try
             {
                 if (changed.IsCompleted || !target.IsCurrent || Native.ModifiersDown || !backup.Original.IsCurrent)
                     return "焦点或剪贴板已变化，请重试。";
                 if (!Native.ControlKey(Keys.C)) return "无法读取当前窗口中的选区。";
-                if (await Task.WhenAny(changed, Task.Delay(700)) != changed || !await changed)
+                if (await Task.WhenAny(changed, Task.Delay(700)) != changed || !(change = await changed).HasValue)
                     return "未复制到文字，请在可编辑区域选中文字。";
             }
             finally { channel.StopWatching(); }
 
-            ClipboardStamp copied = ClipboardStamp.Current;
+            ClipboardStamp copied = change.Value;
             if (copied.Owner == IntPtr.Zero || Native.ProcessId(copied.Owner) != target.ProcessId)
                 return "剪贴板已由其他应用更新，请重试。";
-            if (backup.Original.IsCurrent) return "未复制到新的选区。";
             transfer.Stamp = copied;
 
             ClipboardStamp read = copied;
@@ -232,15 +232,18 @@ namespace PairTap
             if (!Native.ControlKey(Keys.V)) return "无法向当前窗口发送粘贴。";
 
             Task deadline = Task.Delay(550);
-            if (await Task.WhenAny(received, deadline) == received && !await received)
+            if (await Task.WhenAny(received, deadline) != received || !channel.TextPublished)
+                return "当前窗口未读取粘贴内容。";
+
+            string expected = ExpectedValue(verified, replacement);
+            if (expected != null && Interlocked.CompareExchange(ref probing, 1, 0) == 0)
             {
-                string expected = ExpectedValue(verified, replacement);
-                if (expected != null && Interlocked.CompareExchange(ref probing, 1, 0) == 0)
-                    await Task.WhenAny(VerifyPaste(target, verified.Value, expected, deadline), deadline);
-                else
-                    await deadline;
+                Task<bool> confirmed = VerifyPaste(target, verified.Value, expected, deadline);
+                if (await Task.WhenAny(confirmed, deadline) != confirmed || !await confirmed)
+                    return "当前窗口未确认完整替换，请检查选区。";
             }
-            return channel.TextPublished ? null : "当前窗口未读取粘贴内容。";
+            else if (!await received) await deadline;
+            return null;
         }
 
         private static string ExpectedValue(Selection selection, string replacement)
@@ -252,12 +255,11 @@ namespace PairTap
             return value.Substring(0, start) + replacement + value.Substring(start + selection.Text.Length);
         }
 
-        private static async Task VerifyPaste(Target target, ValuePattern value, string expected, Task deadline)
+        private static async Task<bool> VerifyPaste(Target target, ValuePattern value, string expected, Task deadline)
         {
-            bool verified = false;
             try
             {
-                verified = await Task.Run(async () =>
+                return await Task.Run(async () =>
                 {
                     while (!deadline.IsCompleted && target.IsCurrent)
                     {
@@ -270,7 +272,7 @@ namespace PairTap
             catch (System.Runtime.InteropServices.COMException) { }
             catch (InvalidOperationException) { }
             finally { Interlocked.Exchange(ref probing, 0); }
-            if (!verified) await deadline;
+            return false;
         }
     }
 }

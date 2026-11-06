@@ -190,6 +190,7 @@ try {
     $passive = Find-TrayWindow $panelName
     [TestKeys]::Focus($fixture.Handle)
     [void]$editor.Focus()
+    Pump 100
     Assert ([TestKeys]::GetForegroundWindow() -eq $fixture.Handle) 'fixture is active while the browse palette is open'
     [TestKeys]::Hotkey(0x75)
     Assert (Wait-Condition { $active = Find-TrayWindow $panelName; $active -ne [IntPtr]::Zero -and $active -ne $passive } 1400) 'shortcut replaces the background browse palette with a selection palette'

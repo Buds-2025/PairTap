@@ -11,7 +11,9 @@ namespace PairTap
         [DllImport("user32.dll")] private static extern bool RemoveClipboardFormatListener(IntPtr window);
         [DllImport("user32.dll")] private static extern IntPtr GetOpenClipboardWindow();
 
-        private TaskCompletionSource<bool> changed, read;
+        private TaskCompletionSource<ClipboardStamp?> changed;
+        private TaskCompletionSource<bool> read;
+        private ClipboardStamp original;
         private Target recipient;
         private IntPtr pendingText;
         private bool listening, dispatched;
@@ -21,11 +23,12 @@ namespace PairTap
             CreateHandle(new CreateParams { Caption = Product.Name + " Clipboard", Parent = (IntPtr)(-3) });
         }
 
-        internal Task<bool> WatchCopy()
+        internal Task<ClipboardStamp?> WatchCopy(ClipboardStamp baseline)
         {
+            original = baseline;
             listening = AddClipboardFormatListener(Handle);
-            changed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!listening) changed.SetResult(false);
+            changed = new TaskCompletionSource<ClipboardStamp?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!listening) changed.SetResult(null);
             return changed.Task;
         }
 
@@ -58,7 +61,12 @@ namespace PairTap
 
         protected override void WndProc(ref Message message)
         {
-            if (message.Msg == 0x031D && changed != null) changed.TrySetResult(true);
+            if (message.Msg == 0x031D && changed != null)
+            {
+                ClipboardStamp update = ClipboardStamp.Current;
+                if (update.Owner != original.Owner || update.Sequence != original.Sequence)
+                    changed.TrySetResult(update);
+            }
             if (message.Msg == 0x0305 && message.WParam.ToInt64() == ClipboardBuffer.UnicodeFormat &&
                 dispatched && recipient != null && recipient.IsCurrent && pendingText != IntPtr.Zero)
             {

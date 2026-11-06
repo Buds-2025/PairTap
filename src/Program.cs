@@ -160,7 +160,7 @@ namespace PairTap
             RegisterShortcuts(candidate);
             for (int i = 0; i < candidate.Length; i++)
             {
-                if (candidate[i] == Keys.None || available.Contains(i + 1)) continue;
+                if (candidate[i] == Keys.None || available.Contains(i + 1) || candidate[i] == bindings[i]) continue;
                 UnregisterShortcuts();
                 return "无法注册 " + ShortcutSettings.Describe(candidate[i]) + "（" +
                     Shortcut.All[i].Name + "）。请改用其他组合键。";
@@ -171,6 +171,7 @@ namespace PairTap
                 ShortcutSettings.Save(candidate, style);
                 bindings = (Keys[])candidate.Clone();
                 preference = style;
+                NotifyUnavailable();
                 return null;
             }
             catch (System.Security.SecurityException) { }

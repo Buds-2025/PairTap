@@ -118,6 +118,10 @@ public static class TestKeys
     {
         return SendMessage(list, 0x100c, (IntPtr)(-1), (IntPtr)2).ToInt32();
     }
+    public static void ClipboardUpdate(IntPtr window)
+    {
+        SendMessage(window, 0x031d, IntPtr.Zero, IntPtr.Zero);
+    }
 }
 '@
 function Pump($ms) {
@@ -244,6 +248,19 @@ try {
             Assert ([Windows.Forms.Clipboard]::GetText() -ceq 'Concurrent clipboard fixture') 'concurrent clipboard value preserved'
         }
         finally { ([IDisposable]$probe).Dispose() }
+        $channelType = $assembly.GetType('PairTap.ClipboardChannel')
+        $channel = $channelType.GetConstructors($flags)[0].Invoke(@())
+        try {
+            $stampType = $assembly.GetType('PairTap.ClipboardStamp')
+            $stamp = $stampType.GetProperty('Current',[Reflection.BindingFlags]'Static,NonPublic').GetValue($null)
+            $copy = $channelType.GetMethod('WatchCopy',$flags).Invoke($channel,@($stamp))
+            [TestKeys]::ClipboardUpdate($channel.Handle)
+            Assert (!$copy.IsCompleted) 'stale clipboard notification is ignored'
+            [Windows.Forms.Clipboard]::SetText('Fresh clipboard notification fixture')
+            Assert (Wait-Condition { $copy.IsCompleted } 1500) 'a real clipboard change completes the listener'
+            Assert ($null -ne $copy.GetAwaiter().GetResult()) 'the listener retains the new clipboard stamp'
+        }
+        finally { ([IDisposable]$channel).Dispose() }
         [Windows.Forms.Clipboard]::SetDataObject($data, $true)
     }
     $edit.Text = '面板'
@@ -342,7 +359,7 @@ try {
             Assert (($after.Bottom - $after.Top) -lt ($before.Bottom - $before.Top)) 'dragging the frame shrinks the palette height'
             SaveShot $window $env:PAIRTAP_TEST_COMPACT
             $compact = [Windows.Automation.AutomationElement]::FromHandle($window)
-            $tile = FindUI $compact '弯双引号'
+            $tile = FindUI $compact '双引号'
             $top = $tile.Current.BoundingRectangle.Top
             [TestKeys]::Wheel($after.Left + 80, $after.Top + 195, -120)
             Pump 250

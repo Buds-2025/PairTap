@@ -58,7 +58,7 @@ namespace PairTap
 
         internal const uint UnicodeFormat = 13;
         private const int TextLimit = 2 * 1024 * 1024;
-        private const ulong SnapshotLimit = 32 * 1024 * 1024;
+        private const ulong SnapshotLimit = 128 * 1024 * 1024;
         private static readonly uint ExcludeFromHistory = RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
 
         private readonly List<Entry> entries = new List<Entry>();

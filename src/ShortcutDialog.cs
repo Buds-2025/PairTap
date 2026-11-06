@@ -41,11 +41,11 @@ namespace PairTap
             Controls.Add(layout);
             layout.Controls.Add(new Label {
                 AutoSize = true, Margin = new Padding(3, 2, 3, 12),
-                Text = "选择一项，在快捷键框内按下组合键。保存后立即生效。"
+                Text = "选择一项，在录入框按下组合键。清除可禁用，保存后生效。"
             }, 0, 0);
 
             var style = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-            style.Controls.Add(new Label { Text = "跟随类快捷键的标点样式", AutoSize = true, Margin = new Padding(3, 6, 12, 6) });
+            style.Controls.Add(new Label { Text = "“跟随样式”项的标点", AutoSize = true, Margin = new Padding(3, 6, 12, 6) });
             shape = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 158, AccessibleName = "标点样式" };
             shape.Items.AddRange(new object[] { "自动识别输入法", "固定中文标点", "固定半角标点", "固定全角标点" });
             shape.SelectedIndex = (int)preference;
@@ -65,12 +65,15 @@ namespace PairTap
             {
                 Shortcut entry = Shortcut.All[i];
                 var item = new ListViewItem(entry.Name);
-                item.SubItems.Add(entry.Pair != null ? entry.Pair.Left + " " + entry.Pair.Right :
-                    entry.OriginalKey != '\0' ? entry.Resolve(PunctuationShape.Half).Left + " " +
-                    entry.Resolve(PunctuationShape.Half).Right : "—");
+                item.SubItems.Add(SymbolPreview(entry));
                 item.SubItems.Add(Display(draft[i]));
                 list.Items.Add(item);
             }
+            shape.SelectedIndexChanged += (sender, args) =>
+            {
+                for (int i = 0; i < Shortcut.All.Length; i++)
+                    list.Items[i].SubItems[1].Text = SymbolPreview(Shortcut.All[i]);
+            };
             list.SelectedIndexChanged += (sender, args) => RefreshCapture();
             list.DoubleClick += (sender, args) => capture.Focus();
             layout.Controls.Add(list, 0, 2);
@@ -94,6 +97,7 @@ namespace PairTap
             save = new Button { Text = "保存", AutoSize = true };
             save.Click += (sender, args) => SaveChanges();
             var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
+            cancel.Click += (sender, args) => Close();
             var reset = new Button { Text = "恢复默认", AutoSize = true };
             reset.Click += (sender, args) => {
                 draft = ShortcutSettings.Defaults();
@@ -162,6 +166,17 @@ namespace PairTap
 
         private int Selection { get { return list.SelectedIndices.Count == 0 ? -1 : list.SelectedIndices[0]; } }
 
+        private string SymbolPreview(Shortcut entry)
+        {
+            if (entry.Pair != null) return entry.Pair.Left + " " + entry.Pair.Right;
+            if (entry.OriginalKey == '\0') return "—";
+            var style = (PunctuationPreference)shape.SelectedIndex;
+            if (style == PunctuationPreference.Auto) return "随输入法";
+            Pair pair = entry.Resolve(style == PunctuationPreference.Chinese ? PunctuationShape.Chinese :
+                style == PunctuationPreference.Full ? PunctuationShape.Full : PunctuationShape.Half);
+            return pair.Left + " " + pair.Right;
+        }
+
         private void RefreshCapture()
         {
             int index = Selection;
@@ -177,7 +192,9 @@ namespace PairTap
             if (index < 0) return;
             if (!ShortcutSettings.IsValid(keys))
             {
-                status.Text = "请换一组快捷键。Ctrl+C、Ctrl+V 和 F12 保留给系统或编辑操作。";
+                status.Text = ShortcutSettings.IsReserved(keys) ?
+                    "Ctrl+C、Ctrl+V 和含 F12 的组合键为保留键。" :
+                    "请按 Ctrl 或 Alt 加一个主键，可另加 Shift。";
                 return;
             }
             if (keys != Keys.None)
@@ -192,6 +209,7 @@ namespace PairTap
             draft[index] = keys;
             list.Items[index].SubItems[2].Text = Display(keys);
             RefreshCapture();
+            status.Text = keys == Keys.None ? "已清除这项快捷键，保存后禁用。" : "已录入组合键，保存后生效。";
         }
 
         private void SaveChanges()

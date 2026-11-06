@@ -11,7 +11,7 @@ namespace PairTap
 
     internal sealed class Shortcut
     {
-        internal readonly string Id, Group, Name;
+        internal readonly string Id, Name;
         internal readonly Pair Pair;
         internal readonly Keys DefaultKey;
         internal readonly char OriginalKey;
@@ -24,10 +24,9 @@ namespace PairTap
             DefaultKey = key;
         }
 
-        private Shortcut(string id, string group, string name, string left, string right, Keys key = Keys.None)
+        private Shortcut(string id, string name, string left, string right, Keys key = Keys.None)
             : this(id, name, key)
         {
-            Group = group;
             Pair = new Pair(name, left, right);
         }
 
@@ -52,36 +51,33 @@ namespace PairTap
             return OriginalKey == '\0' ? DefaultKey : Native.PunctuationHotkey(OriginalKey, layout);
         }
 
-        private const string Quotes = "引号";
-        private const string Chinese = "中文括号与书名号";
-        private const string Half = "半角符号";
         private const Keys Common = Keys.Control | Keys.Alt;
 
         internal static readonly Shortcut[] All = {
             new Shortcut("palette", "打开标点面板", Common | Keys.F6),
-            new Shortcut("double-curly", Quotes, "弯双引号", "“", "”"),
-            new Shortcut("single-curly", Quotes, "弯单引号", "‘", "’"),
-            new Shortcut("corner", Quotes, "直角引号", "「", "」"),
-            new Shortcut("double-corner", Quotes, "双直角引号", "『", "』"),
-            new Shortcut("guillemets", Quotes, "双尖引号", "«", "»"),
-            new Shortcut("single-guillemets", Quotes, "单尖引号", "‹", "›"),
-            new Shortcut("double-wide-quote", Quotes, "全角直双引号", "＂", "＂"),
-            new Shortcut("single-wide-quote", Quotes, "全角直单引号", "＇", "＇"),
-            new Shortcut("wide-parens", Chinese, "全角圆括号", "（", "）"),
-            new Shortcut("black-brackets", Chinese, "实心方头括号", "【", "】"),
-            new Shortcut("white-brackets", Chinese, "空心方头括号", "〖", "〗"),
-            new Shortcut("tortoise", Chinese, "六角括号", "〔", "〕"),
-            new Shortcut("book", Chinese, "双书名号", "《", "》"),
-            new Shortcut("single-book", Chinese, "单书名号", "〈", "〉"),
-            new Shortcut("wide-square", Chinese, "全角方括号", "［", "］"),
-            new Shortcut("wide-braces", Chinese, "全角花括号", "｛", "｝"),
-            new Shortcut("wide-angle", Chinese, "全角尖括号", "＜", "＞"),
-            new Shortcut("parens", Half, "半角圆括号", "(", ")"),
-            new Shortcut("square", Half, "半角方括号", "[", "]"),
-            new Shortcut("braces", Half, "半角花括号", "{", "}"),
-            new Shortcut("angle", Half, "半角尖括号", "<", ">"),
-            new Shortcut("double-straight", Half, "直双引号", "\"", "\""),
-            new Shortcut("single-straight", Half, "直单引号", "'", "'"),
+            new Shortcut("double-curly", "双引号", "“", "”"),
+            new Shortcut("single-curly", "单引号", "‘", "’"),
+            new Shortcut("corner", "直角引号", "「", "」"),
+            new Shortcut("double-corner", "双直角引号", "『", "』"),
+            new Shortcut("guillemets", "外文双尖引号", "«", "»"),
+            new Shortcut("single-guillemets", "外文单尖引号", "‹", "›"),
+            new Shortcut("double-wide-quote", "全角直双引号", "＂", "＂"),
+            new Shortcut("single-wide-quote", "全角直单引号", "＇", "＇"),
+            new Shortcut("wide-parens", "圆括号", "（", "）"),
+            new Shortcut("black-brackets", "方头括号", "【", "】"),
+            new Shortcut("white-brackets", "空心方头括号", "〖", "〗"),
+            new Shortcut("tortoise", "六角括号", "〔", "〕"),
+            new Shortcut("book", "双书名号", "《", "》"),
+            new Shortcut("single-book", "单书名号", "〈", "〉"),
+            new Shortcut("wide-square", "全角方括号", "［", "］"),
+            new Shortcut("wide-braces", "全角花括号", "｛", "｝"),
+            new Shortcut("wide-angle", "全角尖括号", "＜", "＞"),
+            new Shortcut("parens", "半角圆括号", "(", ")"),
+            new Shortcut("square", "半角方括号", "[", "]"),
+            new Shortcut("braces", "半角花括号", "{", "}"),
+            new Shortcut("angle", "半角尖括号", "<", ">"),
+            new Shortcut("double-straight", "半角直双引号", "\"", "\""),
+            new Shortcut("single-straight", "半角直单引号", "'", "'"),
             new Shortcut("auto-double", "跟随样式 · 双引号", '"', "double-curly", "double-straight", "double-wide-quote"),
             new Shortcut("auto-single", "跟随样式 · 单引号", '\'', "single-curly", "single-straight", "single-wide-quote"),
             new Shortcut("auto-parens", "跟随样式 · 圆括号", '(', "wide-parens", "parens", "wide-parens"),
@@ -124,6 +120,7 @@ namespace PairTap
                     var items = new Dictionary<string, Keys>();
                     foreach (string value in values)
                     {
+                        if (string.IsNullOrEmpty(value)) continue;
                         string[] parts = value.Split('=');
                         int code;
                         if (parts.Length != 2 || !int.TryParse(parts[1], NumberStyles.None,
@@ -146,6 +143,7 @@ namespace PairTap
             }
             catch (System.Security.SecurityException) { return Defaults(); }
             catch (System.IO.IOException) { return Defaults(); }
+            catch (UnauthorizedAccessException) { return Defaults(); }
             return result;
         }
 
@@ -168,7 +166,7 @@ namespace PairTap
                     foreach (string value in values)
                     {
                         int code;
-                        if (value.StartsWith("style=", StringComparison.Ordinal) &&
+                        if (value != null && value.StartsWith("style=", StringComparison.Ordinal) &&
                             int.TryParse(value.Substring(6), NumberStyles.None, CultureInfo.InvariantCulture, out code) &&
                             Enum.IsDefined(typeof(PunctuationPreference), code))
                             return (PunctuationPreference)code;
@@ -176,6 +174,8 @@ namespace PairTap
                 }
             }
             catch (System.Security.SecurityException) { }
+            catch (System.IO.IOException) { }
+            catch (UnauthorizedAccessException) { }
             return PunctuationPreference.Auto;
         }
 
@@ -196,13 +196,18 @@ namespace PairTap
             Keys key = keys & Keys.KeyCode;
             Keys modifiers = keys & Keys.Modifiers;
             if ((modifiers & Required) == 0 || (modifiers & ~(Required | Keys.Shift)) != 0) return false;
-            if ((modifiers == Keys.Control && (key == Keys.C || key == Keys.V)) || key == Keys.F12) return false;
+            if (IsReserved(keys)) return false;
             return (key >= Keys.A && key <= Keys.Z) || (key >= Keys.D0 && key <= Keys.D9)
                 || (key >= Keys.NumPad0 && key <= Keys.Divide) || (key >= Keys.F1 && key <= Keys.F24)
                 || (key >= Keys.OemSemicolon && key <= Keys.Oemtilde)
                 || (key >= Keys.OemOpenBrackets && key <= Keys.OemBackslash)
                 || key == Keys.Space || key == Keys.Enter || key == Keys.Back || key == Keys.Delete
                 || key == Keys.Insert || (key >= Keys.PageUp && key <= Keys.Down);
+        }
+
+        internal static bool IsReserved(Keys keys)
+        {
+            return keys == (Keys.Control | Keys.C) || keys == (Keys.Control | Keys.V) || (keys & Keys.KeyCode) == Keys.F12;
         }
 
         internal static uint NativeModifiers(Keys keys)

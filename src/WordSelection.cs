@@ -128,8 +128,12 @@ namespace PairTap
             if (target.IsCurrent)
             {
                 // Word can shift range positions while tracking insertions.
-                right.Collapse(0);
-                right.Select();
+                try
+                {
+                    right.Collapse(0);
+                    right.Select();
+                }
+                catch (COMException error) { Diagnostics.Failure("word_caret", error); }
             }
             return null;
         }

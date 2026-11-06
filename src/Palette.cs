@@ -13,8 +13,8 @@ namespace PairTap
         private static readonly FontFamily SymbolFont = new FontFamily("Segoe UI");
         private readonly Font heading = new Font(InterfaceFont, 17, FontStyle.Bold);
         private readonly Font body = new Font(InterfaceFont, 9);
-        private readonly Font section = new Font(InterfaceFont, 9, FontStyle.Bold);
-        private readonly Font symbols = new Font(SymbolFont, 17, FontStyle.Regular);
+        private readonly Font fullWidthSymbols = new Font("SimSun", 17);
+        private readonly Font halfWidthSymbols = new Font("Times New Roman", 17);
         private readonly Font sample = new Font(InterfaceFont, 10);
         private readonly Font keys = new Font(SymbolFont, 8);
         private readonly bool contrast = SystemInformation.HighContrast;
@@ -25,8 +25,8 @@ namespace PairTap
         private Color ink, muted, surface, outline, hover, accent, pressed;
         private readonly Panel viewport, scrolling;
         private readonly VScrollBar scrollbar;
-        private readonly Label[] groupLabels;
-        private readonly PairButton[] tiles;
+        private readonly Control[] tiles;
+        private readonly Bitmap profileQr;
         private bool chosen;
         internal event Action Configure;
         internal event Action<Pair> Chosen;
@@ -66,7 +66,7 @@ namespace PairTap
             MinimizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
-            ClientSize = new Size(744, 747);
+            ClientSize = new Size(744, 546);
 
             var header = new Panel { Dock = DockStyle.Top, Height = 86, TabIndex = 0 };
             var brand = new Panel { Bounds = new Rectangle(22, 21, 44, 44) };
@@ -108,29 +108,23 @@ namespace PairTap
             viewport.Controls.Add(scrollbar);
             if (dark && !contrast)
                 DarkExplorer(scrollbar);
-            string[] groups = { "引号", "中文括号与书名号", "半角符号" };
-            groupLabels = new Label[groups.Length];
-            for (int i = 0; i < groups.Length; i++)
-            {
-                groupLabels[i] = MakeLabel(groups[i], section, muted, Rectangle.Empty);
-                scrolling.Controls.Add(groupLabels[i]);
-            }
-
-            tiles = new PairButton[Array.FindAll(Shortcut.All, entry => entry.Pair != null).Length];
-            for (int i = 1; i <= tiles.Length; i++)
+            tiles = new Control[Array.FindAll(Shortcut.All, entry => entry.Pair != null).Length + 1];
+            for (int i = 1, position = 0; i < Shortcut.All.Length; i++)
             {
                 Pair pair = Shortcut.All[i].Pair;
+                if (pair == null) continue;
                 Keys binding = bindings[i];
                 if (binding == Keys.None && shape.HasValue)
                 {
-                    for (int j = tiles.Length + 1; j < bindings.Length; j++)
+                    for (int j = 1; j < bindings.Length; j++)
                     {
-                        if (bindings[j] == Keys.None || Shortcut.All[j].Resolve(shape.Value) != pair) continue;
+                        if (Shortcut.All[j].Pair != null || bindings[j] == Keys.None ||
+                            Shortcut.All[j].Resolve(shape.Value) != pair) continue;
                         binding = bindings[j];
                         break;
                     }
                 }
-                var button = new PairButton(this, pair, ShortcutSettings.Describe(binding)) { Enabled = active, TabIndex = i };
+                var button = new PairButton(this, pair, ShortcutSettings.Describe(binding)) { Enabled = active, TabIndex = position + 1 };
                 button.Click += (sender, args) => {
                     chosen = true;
                     if (Chosen != null) Chosen(pair);
@@ -138,8 +132,19 @@ namespace PairTap
                 button.GotFocus += (sender, args) => BringIntoView(button);
                 button.MouseWheel += ScrollTiles;
                 scrolling.Controls.Add(button);
-                tiles[i - 1] = button;
+                tiles[position++] = button;
             }
+            using (var stream = typeof(Palette).Assembly.GetManifestResourceStream("bilibili-qr"))
+            using (var image = Image.FromStream(stream))
+                profileQr = new Bitmap(image);
+            var qr = new Panel {
+                TabStop = false, AccessibleRole = AccessibleRole.Graphic,
+                AccessibleName = "哔哩哔哩个人主页二维码", BackColor = BackColor
+            };
+            qr.Paint += (sender, args) => DrawQr(args.Graphics, qr.ClientSize);
+            qr.MouseWheel += ScrollTiles;
+            scrolling.Controls.Add(qr);
+            tiles[tiles.Length - 1] = qr;
             Controls.Add(viewport);
             Controls.Add(footer);
             Controls.Add(header);
@@ -201,31 +206,24 @@ namespace PairTap
             double scale = DeviceDpi / 96.0;
             int padding = (int)Math.Round(24 * scale);
             int gap = (int)Math.Round(8 * scale);
-            int groupHeader = (int)Math.Round(29 * scale);
+            int verticalPadding = (int)Math.Round(16 * scale);
             int tileHeight = (int)Math.Round(86 * scale);
             int available = Math.Max(width - padding * 2, 1);
             int columns = Math.Max(1, Math.Min(6, (available + gap) / (int)Math.Round(114 * scale)));
-            int y = (int)Math.Round(7 * scale);
-            int item = 0;
-            foreach (Label label in groupLabels)
+            int rows = (tiles.Length + columns - 1) / columns;
+            if (place)
             {
-                if (place) label.Bounds = new Rectangle(padding, y - scroll, available, groupHeader - gap / 2);
-                y += groupHeader;
-                int count = 0;
-                while (item < tiles.Length && Shortcut.All[item + 1].Group == label.Text)
+                for (int item = 0; item < tiles.Length; item++)
                 {
-                    int column = count % columns;
-                    int row = count / columns;
+                    int column = item % columns;
+                    int row = item / columns;
                     int left = column * (available + gap) / columns;
                     int right = (column + 1) * (available + gap) / columns - gap;
-                    if (place)
-                        tiles[item].Bounds = new Rectangle(padding + left, y + row * (tileHeight + gap) - scroll, right - left, tileHeight);
-                    item++;
-                    count++;
+                    tiles[item].Bounds = new Rectangle(padding + left,
+                        verticalPadding + row * (tileHeight + gap) - scroll, right - left, tileHeight);
                 }
-                y += (count + columns - 1) / columns * (tileHeight + gap) + gap;
             }
-            return y;
+            return 2 * verticalPadding + rows * tileHeight + Math.Max(0, rows - 1) * gap;
         }
 
         protected override void OnHandleCreated(EventArgs args)
@@ -275,16 +273,44 @@ namespace PairTap
             if (!disposing) return;
             heading.Dispose();
             body.Dispose();
-            section.Dispose();
-            symbols.Dispose();
+            fullWidthSymbols.Dispose();
+            halfWidthSymbols.Dispose();
             sample.Dispose();
             keys.Dispose();
+            profileQr.Dispose();
         }
 
         private static Color Hex(int rgb) { return Color.FromArgb(255, Color.FromArgb(rgb)); }
 
+        private void DrawQr(Graphics g, Size size)
+        {
+            float scale = g.DpiX / 96;
+            DrawCard(g, size, scale, surface, outline, false);
+            int padding = (int)Math.Round(8 * scale);
+            int unit = (Math.Min(size.Width, size.Height) - padding) / profileQr.Width;
+            if (unit < 1) return;
+            int side = unit * profileQr.Width;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.DrawImage(profileQr, new Rectangle((size.Width - side) / 2, (size.Height - side) / 2, side, side));
+        }
+
+        private static void DrawCard(Graphics g, Size size, float scale, Color fill, Color border, bool focused)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var path = RoundedRectangle(size.Width - 2, size.Height - 2, 8 * scale))
+            using (var brush = new SolidBrush(fill))
+            using (var pen = new Pen(border, (focused ? 1.8f : 1f) * scale))
+            {
+                g.FillPath(brush, path);
+                g.DrawPath(pen, path);
+            }
+        }
+
         private sealed class PairButton : Button
         {
+            private const TextFormatFlags TextStyle = TextFormatFlags.NoPadding |
+                TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
             private readonly Palette palette;
             private readonly Pair pair;
             private readonly string key;
@@ -313,44 +339,64 @@ namespace PairTap
             {
                 Graphics g = e.Graphics;
                 g.Clear(palette.BackColor);
-                g.SmoothingMode = SmoothingMode.AntiAlias;
                 float scale = g.DpiX / 96;
                 Color fill = !Enabled ? palette.BackColor :
                     pressing ? palette.pressed : hovering ? palette.hover : palette.surface;
                 Color border = Focused ? palette.accent : palette.outline;
-                using (var path = RoundedRectangle(Width - 2, Height - 2, 8 * scale))
-                using (var brush = new SolidBrush(fill))
-                using (var pen = new Pen(border, (Focused ? 1.8f : 1f) * scale))
-                {
-                    g.FillPath(brush, path);
-                    g.DrawPath(pen, path);
-                }
+                DrawCard(g, ClientSize, scale, fill, border, Focused);
+                DrawContent(g, scale);
+            }
 
-                int center = Width / 2;
-                Draw(g, pair.Left, palette.symbols, palette.accent, center - 35 * scale, 5 * scale, 25 * scale, 27 * scale);
-                Draw(g, "文", palette.sample, palette.muted, center - 10 * scale, 6 * scale, 20 * scale, 27 * scale);
-                Draw(g, pair.Right, palette.symbols, palette.accent, center + 10 * scale, 5 * scale, 25 * scale, 27 * scale);
-                Draw(g, pair.Name, palette.body, palette.ink, 2, 33 * scale, Width - 4, 19 * scale);
-                if (key.Length == 0) return;
+            private void DrawContent(Graphics g, float scale)
+            {
+                Font symbol = pair.Left[0] <= '\u00ff' ? palette.halfWidthSymbols : palette.fullWidthSymbols;
+                Size left = Measure(g, pair.Left, symbol);
+                Size right = Measure(g, pair.Right, symbol);
+                Size sample = Measure(g, "文", palette.sample);
+                int glyphGap = (int)Math.Round(2 * scale);
+                int previewWidth = left.Width + sample.Width + right.Width + 2 * glyphGap;
+                int previewHeight = Math.Max(sample.Height, Math.Max(left.Height, right.Height));
+                int labelHeight = Measure(g, pair.Name, palette.body).Height;
+                int gap = (int)Math.Round(4 * scale);
+                int inset = (int)Math.Round(6 * scale);
+                int textWidth = Width - 2 * inset;
+                Size keySize = key.Length == 0 ? Size.Empty : Measure(g, key, palette.keys);
                 int separator = key.LastIndexOf('+');
-                int textWidth = TextRenderer.MeasureText(g, key, palette.keys, Size.Empty, TextFormatFlags.NoPadding).Width;
-                if (separator > 0 && textWidth > Width - 8 * scale)
+                bool wraps = separator > 0 && separator < key.Length - 1 && keySize.Width > textWidth;
+                int keyHeight = keySize.Height * (wraps ? 2 : 1);
+                int contentHeight = previewHeight + gap + labelHeight + (keyHeight == 0 ? 0 : gap + keyHeight);
+                int y = (Height - contentHeight) / 2;
+                int x = (Width - previewWidth) / 2;
+
+                Draw(g, pair.Left, symbol, palette.accent, x, y, left.Width, previewHeight);
+                x += left.Width + glyphGap;
+                Draw(g, "文", palette.sample, palette.muted, x, y, sample.Width, previewHeight);
+                x += sample.Width + glyphGap;
+                Draw(g, pair.Right, symbol, palette.accent, x, y, right.Width, previewHeight);
+
+                y += previewHeight + gap;
+                Draw(g, pair.Name, palette.body, palette.ink, inset, y, textWidth, labelHeight);
+                if (keyHeight == 0) return;
+                y += labelHeight + gap;
+                if (wraps)
                 {
-                    Draw(g, key.Substring(0, separator + 1), palette.keys, palette.muted, 3, 53 * scale, Width - 6, 14 * scale);
-                    Draw(g, key.Substring(separator + 1), palette.keys, palette.muted, 3, 67 * scale, Width - 6, 14 * scale);
+                    Draw(g, key.Substring(0, separator + 1), palette.keys, palette.muted, inset, y, textWidth, keySize.Height);
+                    Draw(g, key.Substring(separator + 1), palette.keys, palette.muted, inset, y + keySize.Height, textWidth, keySize.Height);
                 }
                 else
-                    Draw(g, key, palette.keys, palette.muted, 3, 57 * scale, Width - 6, 18 * scale);
+                    Draw(g, key, palette.keys, palette.muted, inset, y, textWidth, keyHeight);
             }
 
-            private static void Draw(Graphics g, string text, Font font, Color color, float x, float y, float width, float height)
+            private static Size Measure(Graphics g, string text, Font font)
             {
-                var box = Rectangle.Round(new RectangleF(x, y, width, height));
-                TextRenderer.DrawText(g, text, font, box, color,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                return TextRenderer.MeasureText(g, text, font, Size.Empty, TextStyle);
             }
 
-
+            private static void Draw(Graphics g, string text, Font font, Color color, int x, int y, int width, int height)
+            {
+                TextRenderer.DrawText(g, text, font, new Rectangle(x, y, width, height), color,
+                    TextStyle | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            }
         }
         private static GraphicsPath RoundedRectangle(float width, float height, float radius)
         {
