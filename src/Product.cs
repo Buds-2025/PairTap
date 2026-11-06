@@ -9,7 +9,6 @@ namespace PairTap
         internal const string SettingsKey = @"Software\" + Name;
         internal const string InstanceName = @"Local\" + Name + ".63BA74EF";
         internal const string ExitEventName = @"Local\" + Name + ".Exit.63BA74EF";
-        internal const string SetupLock = @"Local\" + Name + ".Setup.63BA74EF";
 
         // Retain the former identifier so an upgrade or portable launch can read existing settings.
         internal const string LegacyId = "SurroundSelection";
