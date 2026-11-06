@@ -33,6 +33,6 @@ Add `Ctrl` to your normal punctuation keystroke to wrap the selected text:
 
 > **Tips**:
 > - Press `Ctrl+Alt+F6` to choose from all 23 matching pairs.
-> - Right-click the tray icon to customize shortcuts or lock output to Chinese marks.
+> - Click the tray icon to view the punctuation panel. Right-click and choose Shortcut Settings to customize shortcuts or lock output to Chinese marks.
 > - In Word documents and tables, PairTap inserts delimiters around the selection, preserving its formatting. A single undo removes both delimiters.
 > - The runtime log at `%LOCALAPPDATA%\PairTap\Logs\runtime.log` records operation status, timing, and error codes.

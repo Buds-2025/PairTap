@@ -137,6 +137,10 @@ function Wait-Condition([scriptblock]$condition, [int]$timeout) {
     return $false
 }
 function Assert($ok, $message) { if (!$ok) { throw $message }; Write-Output "PASS $message" }
+if ($env:PAIRTAP_TEST_TRAY) {
+    & (Join-Path $PSScriptRoot 'Tray.ps1')
+    return
+}
 $assembly = [Reflection.Assembly]::LoadFile($env:PAIRTAP_TEST_EXE)
 $bufferType = $assembly.GetType('PairTap.ClipboardBuffer')
 $sequenceMethod = $bufferType.GetMethod('GetClipboardSequenceNumber',[Reflection.BindingFlags]'Static,NonPublic')

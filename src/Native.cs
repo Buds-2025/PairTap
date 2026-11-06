@@ -11,6 +11,8 @@ namespace PairTap
         [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(IntPtr h, int id);
         [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
         [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint first, uint second, bool attach);
         [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -144,6 +146,12 @@ namespace PairTap
             if (current == targetThread || !AttachThreadInput(current, targetThread, true)) return false;
             try { return GetForegroundWindow() == source.Window && SetForegroundWindow(palette); }
             finally { AttachThreadInput(current, targetThread, false); }
+        }
+
+        internal static void EnsureVisible(IntPtr window)
+        {
+            // A launcher can supply SW_HIDE, which overrides the first ShowWindow call.
+            if (!IsWindowVisible(window)) ShowWindow(window, 5);
         }
 
         internal static string ClassName(IntPtr window)

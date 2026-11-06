@@ -70,7 +70,7 @@ namespace PairTap
 
             var header = new Panel { Dock = DockStyle.Top, Height = 86, TabIndex = 0 };
             var brand = new Panel { Bounds = new Rectangle(22, 21, 44, 44) };
-            brand.Paint += DrawBrand;
+            brand.Paint += (sender, args) => args.Graphics.DrawIcon(icon, brand.ClientRectangle);
             header.Controls.Add(brand);
             header.Controls.Add(MakeLabel(active ? "选择一对标点" : Product.ChineseName, heading, ink,
                 new Rectangle(80, 14, 640, 34)));
@@ -226,26 +226,6 @@ namespace PairTap
                 y += (count + columns - 1) / columns * (tileHeight + gap) + gap;
             }
             return y;
-        }
-
-        private void DrawBrand(object sender, PaintEventArgs args)
-        {
-            var panel = (Panel)sender;
-            Graphics g = args.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.ScaleTransform(panel.Width / 44f, panel.Height / 44f);
-            using (var fill = new SolidBrush(contrast ? SystemColors.Highlight : Hex(0x165EC5)))
-            using (var pen = new Pen(contrast ? SystemColors.HighlightText : Color.White, 2.5f))
-            using (var dot = new SolidBrush(contrast ? SystemColors.HighlightText : Hex(0xBCE0FF)))
-            using (var path = RoundedRectangle(43, 43, 9))
-            {
-                pen.StartCap = pen.EndCap = LineCap.Round;
-                pen.LineJoin = LineJoin.Round;
-                g.FillPath(fill, path);
-                g.DrawLines(pen, new[] { new Point(17, 12), new Point(12, 12), new Point(12, 32), new Point(17, 32) });
-                g.DrawLines(pen, new[] { new Point(27, 12), new Point(32, 12), new Point(32, 32), new Point(27, 32) });
-                g.FillEllipse(dot, 20, 20, 4, 4);
-            }
         }
 
         protected override void OnHandleCreated(EventArgs args)

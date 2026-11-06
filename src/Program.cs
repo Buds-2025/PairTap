@@ -23,21 +23,26 @@ namespace PairTap
         private static void Main()
         {
             bool first;
+            using (var openEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Product.OpenEventName))
             using (var instance = new Mutex(true, Product.InstanceName, out first))
             {
-                if (!first) return;
+                if (!first)
+                {
+                    TrayIconWindow.AllowResidentActivation();
+                    openEvent.Set();
+                    return;
+                }
                 SetProcessDPIAware();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                using (var context = new TrayApp()) Application.Run(context);
+                using (var context = new TrayApp(openEvent)) Application.Run(context);
             }
         }
     }
 
     internal sealed class TrayApp : ApplicationContext
     {
-        private readonly NotifyIcon tray;
-        private readonly ContextMenuStrip menu;
+        private readonly TrayIconWindow tray;
         private readonly HotkeyWindow hotkeys;
         private readonly ClipboardChannel clipboard;
         private readonly HashSet<int> available = new HashSet<int>();
@@ -49,9 +54,10 @@ namespace PairTap
         private Keys[] bindings;
         private PunctuationPreference preference;
         private IntPtr keyboardLayout;
+        private TrayCommand? pendingTrayCommand;
         private bool busy, exitRequested;
 
-        internal TrayApp()
+        internal TrayApp(EventWaitHandle openEvent)
         {
             Diagnostics.Write("startup version=" + Product.Version);
             hotkeys = new HotkeyWindow(HandleHotkey);
@@ -62,31 +68,22 @@ namespace PairTap
                 source.Position = 0;
                 trayIcon = new Icon(source, SystemInformation.SmallIconSize);
             }
-            menu = new ContextMenuStrip();
-            menu.Items.Add("先选中文字，再按快捷键").Enabled = false;
-            tray = new NotifyIcon {
-                Text = Product.DisplayName,
-                Icon = trayIcon,
-                ContextMenuStrip = menu,
-                Visible = true
-            };
-            tray.DoubleClick += (sender, args) => ShowPalette(null);
-
             bindings = ShortcutSettings.Load();
             preference = ShortcutSettings.Preference();
             keyboardLayout = Native.KeyboardLayout(Native.GetForegroundWindow());
+            tray = new TrayIconWindow(trayIcon, HandleTrayCommand);
             RegisterShortcuts(bindings);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("快捷键设置", null, (sender, args) => ShowShortcutSettings());
-            menu.Items.Add("查看符号面板", null, (sender, args) => ShowPalette(null));
-            menu.Items.Add("退出", null, (sender, args) => RequestExit());
 
             exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Product.ExitEventName);
             exitTimer = new System.Windows.Forms.Timer { Interval = 200 };
             exitTimer.Tick += (sender, args) =>
             {
                 if (exitEvent.WaitOne(0)) RequestExit();
-                else UpdateKeyboardLayout();
+                if (exitRequested || tray.MenuOpen) return;
+                tray.EnsureRegistered();
+                if (openEvent.WaitOne(0)) HandleTrayCommand(TrayCommand.Palette);
+                if (!busy && pendingTrayCommand.HasValue) HandleTrayCommand(pendingTrayCommand.Value);
+                UpdateKeyboardLayout();
             };
             exitTimer.Start();
 
@@ -137,12 +134,12 @@ namespace PairTap
             if (busy || exitRequested) return;
             if (shortcutDialog != null)
             {
-                shortcutDialog.Activate();
+                ActivateForm(shortcutDialog);
                 return;
             }
             Palette previous = palette;
-            UnregisterShortcuts();
             var dialog = new ShortcutDialog(bindings, preference, icon, SaveShortcuts);
+            UnregisterShortcuts();
             shortcutDialog = dialog;
             dialog.FormClosed += (sender, args) =>
             {
@@ -154,7 +151,7 @@ namespace PairTap
                 }
             };
             dialog.Show();
-            dialog.Activate();
+            ActivateForm(dialog);
             if (previous != null && !previous.IsDisposed) previous.Close();
         }
 
@@ -185,12 +182,12 @@ namespace PairTap
 
         private async void HandleHotkey(int id, uint chord)
         {
-            if (busy || exitRequested || shortcutDialog != null || !available.Contains(id)) return;
+            if (busy || exitRequested || tray.MenuOpen || shortcutDialog != null || !available.Contains(id)) return;
             Keys expected = bindings[id - 1];
             uint registeredChord = ((uint)(expected & Keys.KeyCode) << 16) |
                 (ShortcutSettings.NativeModifiers(expected) & 7);
             if (registeredChord != chord) return;
-            if (palette != null)
+            if (palette != null && Native.GetForegroundWindow() == palette.Handle)
             {
                 if (id == 1) palette.Close();
                 return;
@@ -201,9 +198,10 @@ namespace PairTap
             {
                 busy = true;
                 for (int i = 0; Native.ModifiersDown && i < 60; i++) await Task.Delay(25);
-                busy = false;
-                if (exitRequested) ExitThread();
-                else if (!Native.ModifiersDown && target.IsCurrent) ShowPalette(target);
+                bool trayRequested = pendingTrayCommand.HasValue || exitRequested || tray.MenuOpen;
+                FinishOperation();
+                if (!trayRequested && !Native.ModifiersDown && target.IsCurrent)
+                    ShowPalette(target);
             }
             else
             {
@@ -240,34 +238,79 @@ namespace PairTap
             if (busy || exitRequested) return;
             if (shortcutDialog != null)
             {
-                shortcutDialog.Activate();
+                ActivateForm(shortcutDialog);
                 return;
             }
-            if (palette != null)
+            if (palette != null && target == null)
             {
-                palette.Activate();
+                ActivateForm(palette);
                 return;
             }
             PunctuationShape? shape = target == null ? (PunctuationShape?)null :
                 CurrentShape(target, Native.KeyboardLayout(target.Focus));
-            palette = new Palette(bindings, shape, available.Contains(1), icon);
-            palette.Configure += ShowShortcutSettings;
-            palette.Chosen += pair =>
+            Palette previous = palette;
+            var window = new Palette(bindings, shape, available.Contains(1), icon);
+            palette = window;
+            window.Configure += () => HandleTrayCommand(TrayCommand.Settings);
+            if (target != null) window.Chosen += pair =>
             {
-                palette.Hide();
+                window.Hide();
                 Native.SetForegroundWindow(target.Window);
-                palette.Close();
+                window.Close();
                 Apply(target, pair, true);
             };
-            palette.FormClosed += (sender, args) => palette = null;
-            palette.Show();
-            if (palette == null) return;
-            if (target == null) palette.Activate();
-            else if (!Native.ActivatePalette(palette.Handle, target))
+            window.FormClosed += (sender, args) =>
             {
-                palette.Close();
-                Notify("原输入窗口焦点已变化，请重新选中文字。");
+                if (palette == window) palette = previous != null && !previous.IsDisposed ? previous : null;
+            };
+            window.Show();
+            if (window.IsDisposed) return;
+            if (target == null) ActivateForm(window);
+            else
+            {
+                Native.EnsureVisible(window.Handle);
+                if (!window.IsDisposed && !Native.ActivatePalette(window.Handle, target))
+                {
+                    window.Close();
+                    Notify("原输入窗口焦点已变化，请重新选中文字。");
+                }
             }
+            if (!window.IsDisposed && previous != null && !previous.IsDisposed) previous.Close();
+        }
+
+        private static void ActivateForm(Form window)
+        {
+            if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
+            Native.EnsureVisible(window.Handle);
+            window.Activate();
+            if (Native.GetForegroundWindow() != window.Handle)
+                Native.SetForegroundWindow(window.Handle);
+        }
+
+        private void HandleTrayCommand(TrayCommand command)
+        {
+            if (exitRequested) return;
+            Diagnostics.Write("tray_command action=" + command + " deferred=" + (busy && command != TrayCommand.Exit));
+            if (command == TrayCommand.Exit)
+            {
+                RequestExit();
+                return;
+            }
+            if (busy)
+            {
+                pendingTrayCommand = command;
+                return;
+            }
+            pendingTrayCommand = null;
+            if (command == TrayCommand.Settings) ShowShortcutSettings();
+            else if (command == TrayCommand.Palette) ShowPalette(null);
+        }
+
+        private void FinishOperation()
+        {
+            busy = false;
+            if (exitRequested) ExitThread();
+            else if (!tray.MenuOpen && pendingTrayCommand.HasValue) HandleTrayCommand(pendingTrayCommand.Value);
         }
 
         private async void Apply(Target target, Pair pair, bool returningFromPalette = false)
@@ -290,20 +333,17 @@ namespace PairTap
             catch (InvalidOperationException error) { Diagnostics.Failure(context, error); Notify(error.Message); }
             catch (ExternalException error) { Diagnostics.Failure(context, error); Notify("当前窗口或剪贴板暂时不可用，请重新选中后重试。"); }
             catch (Exception error) { Diagnostics.Failure(context, error); Notify("这个选区暂时无法处理。请选中普通文字后重试。"); }
-            finally
-            {
-                busy = false;
-                if (exitRequested) ExitThread();
-            }
+            finally { FinishOperation(); }
         }
 
         private void RequestExit()
         {
             exitRequested = true;
+            tray.DismissMenu();
             if (!busy) ExitThread();
         }
 
-        private void Notify(string text) { tray.ShowBalloonTip(3500, Product.ChineseName, text, ToolTipIcon.Info); }
+        private void Notify(string text) { tray.Notify(text); }
 
         protected override void Dispose(bool disposing)
         {
@@ -312,9 +352,7 @@ namespace PairTap
                 exitTimer.Dispose();
                 exitEvent.Dispose();
                 if (palette != null) palette.Close();
-                tray.Visible = false;
                 tray.Dispose();
-                menu.Dispose();
                 if (shortcutDialog != null) shortcutDialog.Close();
                 UnregisterShortcuts();
                 clipboard.Dispose();

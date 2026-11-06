@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img">
+  <title>PairTap 「×」应用图标</title>
+  <rect x="4" y="4" width="120" height="120" rx="20" fill="#101E44"/>
+<path id="left-quote" fill="#F2F5FF" d="M36 28H61V37H40A3 3 0 0 0 37 40V61H28V36A8 8 0 0 1 36 28Z"/>
+<path id="times" fill="#C9F441" d="M53 46.5L64 57.5L75 46.5L81.5 53L70.5 64L81.5 75L75 81.5L64 70.5L53 81.5L46.5 75L57.5 64L46.5 53Z"/>
+<path id="right-quote" fill="#F2F5FF" d="M36 28H61V37H40A3 3 0 0 0 37 40V61H28V36A8 8 0 0 1 36 28Z" transform="rotate(180 64 64)"/>
+</svg>
