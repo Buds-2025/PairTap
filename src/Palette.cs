@@ -7,27 +7,28 @@ using Microsoft.Win32;
 
 namespace PairTap
 {
-    internal sealed class Palette : Form
+    internal sealed class Palette : DpiForm
     {
-        private static readonly FontFamily InterfaceFont = new FontFamily("Microsoft YaHei UI");
-        private static readonly FontFamily SymbolFont = new FontFamily("Segoe UI");
-        private readonly Font heading = new Font(InterfaceFont, 17, FontStyle.Bold);
-        private readonly Font body = new Font(InterfaceFont, 9);
-        private readonly Font fullWidthSymbols = new Font("SimSun", 17);
-        private readonly Font halfWidthSymbols = new Font("Times New Roman", 17);
-        private readonly Font sample = new Font(InterfaceFont, 10);
-        private readonly Font keys = new Font(SymbolFont, 8);
+        private const string InterfaceFont = "Microsoft YaHei UI";
+        private Font heading, body, fullWidthSymbols, halfWidthSymbols, sample, keys;
         private readonly bool contrast = SystemInformation.HighContrast;
         private readonly bool dark = DarkTheme;
         internal static bool DarkTheme { get { return Convert.ToInt32(Registry.GetValue(
             @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
             "AppsUseLightTheme", 1)) == 0; } }
         private Color ink, muted, surface, outline, hover, accent, pressed;
+        private readonly Panel header, brand, footer, rule;
+        private readonly Label title, hint, footerHint;
+        private readonly Button settings;
         private readonly Panel viewport, scrolling;
         private readonly VScrollBar scrollbar;
         private readonly Control[] tiles;
         private readonly Bitmap profileQr;
         private bool chosen;
+        private int minimumTileWidth, scrollOffset;
+        private Size settingsText;
+        private bool reflowing, updatingDisplay;
+        private double fontDensity;
         internal event Action Configure;
         internal event Action<Pair> Chosen;
 
@@ -42,6 +43,7 @@ namespace PairTap
         }
 
         internal Palette(Keys[] bindings, PunctuationShape? shape, bool paletteAvailable, Icon icon)
+            : base(new Size(744, 546), new Size(325, 310))
         {
             bool active = shape.HasValue;
             BackColor = contrast ? SystemColors.Window : dark ? Hex(0x202020) : Hex(0xF5F6F8);
@@ -52,43 +54,36 @@ namespace PairTap
             hover = contrast ? SystemColors.Control : dark ? Hex(0x28394F) : Hex(0xEAF2FF);
             pressed = contrast ? SystemColors.Control : dark ? Hex(0x324B6B) : Hex(0xD8E9FF);
             accent = contrast ? SystemColors.Highlight : dark ? Hex(0x91C4FF) : Hex(0x165EC5);
-            AutoScaleDimensions = new SizeF(96, 96);
-            AutoScaleMode = AutoScaleMode.Dpi;
-            Font = body;
             ForeColor = ink;
             Icon = icon;
             Text = Product.DisplayName;
             FormBorderStyle = FormBorderStyle.Sizable;
             SizeGripStyle = SizeGripStyle.Show;
-            StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(386, 320);
             MaximizeBox = true;
             MinimizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
-            ClientSize = new Size(744, 546);
 
-            var header = new Panel { Dock = DockStyle.Top, Height = 86, TabIndex = 0 };
-            var brand = new Panel { Bounds = new Rectangle(22, 21, 44, 44) };
+            header = new Panel { Dock = DockStyle.Top, TabIndex = 0 };
+            brand = new Panel();
             brand.Paint += (sender, args) => args.Graphics.DrawIcon(icon, brand.ClientRectangle);
             header.Controls.Add(brand);
-            header.Controls.Add(MakeLabel(active ? "选择一对标点" : Product.ChineseName, heading, ink,
-                new Rectangle(80, 14, 640, 34)));
+            title = MakeLabel(active ? "选择一对标点" : Product.ChineseName, ink);
+            header.Controls.Add(title);
             string key = ShortcutSettings.Describe(bindings[0]);
             string instruction = active ? "点击符号，将它加到选区两侧。" :
                 paletteAvailable ? "选中文字，再按 " + key + " 打开面板。" :
                 "请在快捷键设置中启用面板快捷键。";
-            var hint = MakeLabel(instruction, body, muted, new Rectangle(81, 49, 637, 34));
-            hint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            hint = MakeLabel(instruction, muted);
             header.Controls.Add(hint);
 
-            var footer = new Panel { Dock = DockStyle.Bottom, Height = 56, TabIndex = 2 };
-            footer.Controls.Add(new Panel { BackColor = outline, Dock = DockStyle.Top, Height = 1 });
-            footer.Controls.Add(MakeLabel(active ? "Tab 切换 · Enter 应用 · Esc 关闭" : "拖动边框可调整面板大小", body, muted,
-                new Rectangle(24, 11, 205, 30)));
-            var settings = new Button {
-                Text = "快捷键设置", Size = new Size(106, 30), Location = new Point(612, 11),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right, ForeColor = ink, BackColor = surface,
+            footer = new Panel { Dock = DockStyle.Bottom, TabIndex = 2 };
+            rule = new Panel { BackColor = outline, Dock = DockStyle.Top };
+            footer.Controls.Add(rule);
+            footerHint = MakeLabel(active ? "Tab 切换 · Enter 应用 · Esc 关闭" : "拖动边框可调整面板大小", muted);
+            footer.Controls.Add(footerHint);
+            settings = new Button {
+                Text = "快捷键设置", ForeColor = ink, BackColor = surface,
                 FlatStyle = contrast ? FlatStyle.System : FlatStyle.Flat
             };
             settings.FlatAppearance.BorderColor = outline;
@@ -98,8 +93,6 @@ namespace PairTap
                 if (Configure != null) Configure();
             };
             footer.Controls.Add(settings);
-            footer.Width = ClientSize.Width;
-            settings.Left = footer.ClientSize.Width - 132;
 
             viewport = new Panel { Dock = DockStyle.Fill, TabIndex = 1 };
             scrolling = new Panel { Dock = DockStyle.Fill };
@@ -150,35 +143,102 @@ namespace PairTap
             Controls.Add(header);
             viewport.Resize += (sender, args) => Reflow();
             scrolling.MouseWheel += ScrollTiles;
-            scrollbar.ValueChanged += (sender, args) => Arrange(scrolling.Width, true, scrollbar.Value);
-            ResizeEnd += (sender, args) => Reflow();
-            Load += (sender, args) =>
+            scrollbar.ValueChanged += (sender, args) =>
             {
-                Rectangle area = Screen.FromControl(this).WorkingArea;
-                Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+                if (reflowing) return;
+                scrollOffset = scrollbar.Value;
                 Reflow();
             };
             Deactivate += (sender, args) => { if (!chosen && active) Close(); };
+        }
+
+        protected override void LayoutForDisplay()
+        {
+            updatingDisplay = true;
+            if (fontDensity != Density)
+            {
+                Font[] previous = { heading, body, fullWidthSymbols, halfWidthSymbols, sample, keys };
+                heading = PixelFont(InterfaceFont, 17, FontStyle.Bold);
+                body = PixelFont(InterfaceFont, 9);
+                fullWidthSymbols = PixelFont("SimSun", 17);
+                halfWidthSymbols = PixelFont("Times New Roman", 17);
+                sample = PixelFont(InterfaceFont, 10);
+                keys = PixelFont("Segoe UI", 8);
+                Font = body;
+                title.Font = heading;
+                hint.Font = footerHint.Font = settings.Font = body;
+                foreach (Font font in previous) if (font != null) font.Dispose();
+                fontDensity = Density;
+            }
+            scrollbar.Width = Math.Max(1, Px(17));
+            minimumTileWidth = Px(106);
+            using (Graphics graphics = CreateGraphics())
+            {
+                settingsText = TextRenderer.MeasureText(graphics, settings.Text, body, Size.Empty,
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+                foreach (Control tile in tiles)
+                {
+                    var button = tile as PairButton;
+                    if (button != null) minimumTileWidth = Math.Max(minimumTileWidth, button.MeasureContent(graphics));
+                }
+            }
+            updatingDisplay = false;
+            LayoutChrome();
             Reflow();
+            Invalidate(true);
+        }
+
+        protected override void OnClientSizeChanged(EventArgs args)
+        {
+            base.OnClientSizeChanged(args);
+            if (body != null && !updatingDisplay) LayoutChrome();
+        }
+
+        private void LayoutChrome()
+        {
+            int inset = Px(24), top = Px(14), iconSize = Px(44), titleLeft = inset + iconSize + Px(12);
+            int headerWidth = Math.Max(1, ClientSize.Width - titleLeft - inset);
+            int titleHeight = title.GetPreferredSize(new Size(headerWidth, 0)).Height;
+            int hintHeight = hint.GetPreferredSize(new Size(headerWidth, 0)).Height;
+            title.SetBounds(titleLeft, top, headerWidth, titleHeight);
+            hint.SetBounds(titleLeft, title.Bottom + Px(4), headerWidth, hintHeight);
+            header.Height = Math.Max(Px(86), Math.Max(top + iconSize, hint.Bottom) + Px(10));
+            brand.SetBounds(inset, (header.Height - iconSize) / 2, iconSize, iconSize);
+
+            rule.Height = Math.Max(1, Px(1));
+            int buttonWidth = Math.Max(Px(106), settingsText.Width + Px(20));
+            int buttonHeight = Math.Max(Px(30), settingsText.Height + Px(10));
+            int hintWidth = Math.Max(1, ClientSize.Width - 2 * inset - Px(14) - buttonWidth);
+            int footerHintHeight = footerHint.GetPreferredSize(new Size(hintWidth, 0)).Height;
+            footer.Height = Math.Max(Px(54), Math.Max(buttonHeight, footerHintHeight) + Px(18) + rule.Height);
+            settings.SetBounds(ClientSize.Width - inset - buttonWidth, (footer.Height - buttonHeight) / 2, buttonWidth, buttonHeight);
+            footerHint.SetBounds(inset, (footer.Height - footerHintHeight) / 2, hintWidth, footerHintHeight);
         }
 
         private void Reflow()
         {
-            if (viewport.ClientSize.Width < 80) return;
-            int width = viewport.ClientSize.Width;
-            int height = Arrange(width, false, 0);
-            bool needsScroll = height > viewport.ClientSize.Height;
-            scrollbar.Visible = needsScroll;
-            if (needsScroll) width -= scrollbar.Width;
-            height = Arrange(width, false, 0);
-            scrollbar.Maximum = Math.Max(0, height - 1);
-            scrollbar.LargeChange = Math.Max(1, viewport.ClientSize.Height);
-            scrollbar.SmallChange = Math.Max(1, DeviceDpi / 4);
-            int offset = Math.Min(scrollbar.Value, ScrollLimit);
-            scrolling.SuspendLayout();
-            scrollbar.Value = offset;
-            Arrange(width, true, offset);
-            scrolling.ResumeLayout();
+            if (body == null || updatingDisplay || reflowing || viewport.ClientSize.Width <= 0) return;
+            reflowing = true;
+            try
+            {
+                int width = viewport.ClientSize.Width;
+                int height = Arrange(width, false, 0);
+                bool needsScroll = height > viewport.ClientSize.Height;
+                scrollbar.Visible = needsScroll;
+                if (needsScroll)
+                {
+                    width -= scrollbar.Width;
+                    height = Arrange(width, false, 0);
+                }
+                scrollbar.Maximum = Math.Max(0, height - 1);
+                scrollbar.LargeChange = Math.Max(1, viewport.ClientSize.Height);
+                scrollbar.SmallChange = Math.Max(1, Px(26));
+                int offset = needsScroll ? Math.Min(scrollOffset, ScrollLimit) : 0;
+                scrollbar.Value = offset;
+                scrollOffset = offset;
+                Arrange(width, true, offset);
+            }
+            finally { reflowing = false; }
         }
 
         private int ScrollLimit { get { return Math.Max(0, scrollbar.Maximum - scrollbar.LargeChange + 1); } }
@@ -203,13 +263,18 @@ namespace PairTap
 
         private int Arrange(int width, bool place, int scroll)
         {
-            double scale = DeviceDpi / 96.0;
-            int padding = (int)Math.Round(24 * scale);
-            int gap = (int)Math.Round(8 * scale);
-            int verticalPadding = (int)Math.Round(16 * scale);
-            int tileHeight = (int)Math.Round(86 * scale);
+            int padding = Px(24);
+            int gap = Px(8);
+            int verticalPadding = Px(16);
             int available = Math.Max(width - padding * 2, 1);
-            int columns = Math.Max(1, Math.Min(6, (available + gap) / (int)Math.Round(114 * scale)));
+            int columns = Math.Max(1, Math.Min(6, (available + gap) / Math.Max(1, minimumTileWidth + gap)));
+            int tileWidth = (available + gap) / columns - gap;
+            int tileHeight = Math.Max(Px(86), profileQr.Width + Px(12));
+            foreach (Control tile in tiles)
+            {
+                var button = tile as PairButton;
+                if (button != null) tileHeight = Math.Max(tileHeight, button.ContentHeight(tileWidth) + 2 * Px(8));
+            }
             int rows = (tiles.Length + columns - 1) / columns;
             if (place)
             {
@@ -243,11 +308,11 @@ namespace PairTap
             DwmSetWindowAttribute(form.Handle, 35, ref caption, sizeof(int));
         }
 
-        private static Label MakeLabel(string text, Font font, Color color, Rectangle bounds)
+        private static Label MakeLabel(string text, Color color)
         {
             return new Label {
-                Text = text, Font = font, ForeColor = color, TextAlign = ContentAlignment.MiddleLeft,
-                Bounds = bounds
+                Text = text, ForeColor = color, TextAlign = ContentAlignment.MiddleLeft,
+                UseMnemonic = false
             };
         }
 
@@ -271,12 +336,8 @@ namespace PairTap
         {
             base.Dispose(disposing);
             if (!disposing) return;
-            heading.Dispose();
-            body.Dispose();
-            fullWidthSymbols.Dispose();
-            halfWidthSymbols.Dispose();
-            sample.Dispose();
-            keys.Dispose();
+            foreach (Font font in new[] { heading, body, fullWidthSymbols, halfWidthSymbols, sample, keys })
+                if (font != null) font.Dispose();
             profileQr.Dispose();
         }
 
@@ -284,10 +345,11 @@ namespace PairTap
 
         private void DrawQr(Graphics g, Size size)
         {
-            float scale = g.DpiX / 96;
+            if (size.Width < 3 || size.Height < 3) return;
+            float scale = (float)Density;
             DrawCard(g, size, scale, surface, outline, false);
             int padding = (int)Math.Round(8 * scale);
-            int unit = (Math.Min(size.Width, size.Height) - padding) / profileQr.Width;
+            int unit = (Math.Min(size.Width, Math.Min(size.Height, scrolling.ClientSize.Height)) - padding) / profileQr.Width;
             if (unit < 1) return;
             int side = unit * profileQr.Width;
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
@@ -314,6 +376,10 @@ namespace PairTap
             private readonly Palette palette;
             private readonly Pair pair;
             private readonly string key;
+            private readonly int separator;
+            private Font symbol;
+            private Size left, right, sample, keySize;
+            private int previewWidth, previewHeight, labelHeight;
             private bool hovering, pressing;
 
             internal PairButton(Palette palette, Pair pair, string key)
@@ -321,6 +387,7 @@ namespace PairTap
                 this.palette = palette;
                 this.pair = pair;
                 this.key = key;
+                separator = key.LastIndexOf('+');
                 Text = pair.Name;
                 AccessibleName = pair.Name;
                 AccessibleDescription = key.Length == 0 ? pair.Preview : pair.Preview + "，快捷键 " + key;
@@ -339,33 +406,49 @@ namespace PairTap
             {
                 Graphics g = e.Graphics;
                 g.Clear(palette.BackColor);
-                float scale = g.DpiX / 96;
+                if (symbol == null || Width < 3 || Height < 3) return;
+                float scale = (float)palette.Density;
                 Color fill = !Enabled ? palette.BackColor :
                     pressing ? palette.pressed : hovering ? palette.hover : palette.surface;
                 Color border = Focused ? palette.accent : palette.outline;
                 DrawCard(g, ClientSize, scale, fill, border, Focused);
-                DrawContent(g, scale);
+                DrawContent(g);
             }
 
-            private void DrawContent(Graphics g, float scale)
+            internal int MeasureContent(Graphics g)
             {
-                Font symbol = pair.Left[0] <= '\u00ff' ? palette.halfWidthSymbols : palette.fullWidthSymbols;
-                Size left = Measure(g, pair.Left, symbol);
-                Size right = Measure(g, pair.Right, symbol);
-                Size sample = Measure(g, "文", palette.sample);
-                int glyphGap = (int)Math.Round(2 * scale);
-                int previewWidth = left.Width + sample.Width + right.Width + 2 * glyphGap;
-                int previewHeight = Math.Max(sample.Height, Math.Max(left.Height, right.Height));
-                int labelHeight = Measure(g, pair.Name, palette.body).Height;
-                int gap = (int)Math.Round(4 * scale);
-                int inset = (int)Math.Round(6 * scale);
+                symbol = pair.Left[0] <= '\u00ff' ? palette.halfWidthSymbols : palette.fullWidthSymbols;
+                left = Measure(g, pair.Left, symbol);
+                right = Measure(g, pair.Right, symbol);
+                sample = Measure(g, "文", palette.sample);
+                previewWidth = left.Width + sample.Width + right.Width + 2 * palette.Px(2);
+                previewHeight = Math.Max(sample.Height, Math.Max(left.Height, right.Height));
+                Size label = Measure(g, pair.Name, palette.body);
+                labelHeight = label.Height;
+                keySize = key.Length == 0 ? Size.Empty : Measure(g, key, palette.keys);
+                int keyWidth = separator > 0 && separator < key.Length - 1
+                    ? Math.Max(Measure(g, key.Substring(0, separator + 1), palette.keys).Width,
+                        Measure(g, key.Substring(separator + 1), palette.keys).Width)
+                    : keySize.Width;
+                return Math.Max(previewWidth, Math.Max(label.Width, keyWidth)) + 2 * palette.Px(6);
+            }
+
+            private bool Wraps(int width) { return separator > 0 && separator < key.Length - 1 && keySize.Width > width - 2 * palette.Px(6); }
+
+            internal int ContentHeight(int width)
+            {
+                int gap = palette.Px(4);
+                return previewHeight + gap + labelHeight +
+                    (keySize.IsEmpty ? 0 : gap + keySize.Height * (Wraps(width) ? 2 : 1));
+            }
+
+            private void DrawContent(Graphics g)
+            {
+                int glyphGap = palette.Px(2);
+                int gap = palette.Px(4);
+                int inset = palette.Px(6);
                 int textWidth = Width - 2 * inset;
-                Size keySize = key.Length == 0 ? Size.Empty : Measure(g, key, palette.keys);
-                int separator = key.LastIndexOf('+');
-                bool wraps = separator > 0 && separator < key.Length - 1 && keySize.Width > textWidth;
-                int keyHeight = keySize.Height * (wraps ? 2 : 1);
-                int contentHeight = previewHeight + gap + labelHeight + (keyHeight == 0 ? 0 : gap + keyHeight);
-                int y = (Height - contentHeight) / 2;
+                int y = (Height - ContentHeight(Width)) / 2;
                 int x = (Width - previewWidth) / 2;
 
                 Draw(g, pair.Left, symbol, palette.accent, x, y, left.Width, previewHeight);
@@ -376,15 +459,15 @@ namespace PairTap
 
                 y += previewHeight + gap;
                 Draw(g, pair.Name, palette.body, palette.ink, inset, y, textWidth, labelHeight);
-                if (keyHeight == 0) return;
+                if (keySize.IsEmpty) return;
                 y += labelHeight + gap;
-                if (wraps)
+                if (Wraps(Width))
                 {
                     Draw(g, key.Substring(0, separator + 1), palette.keys, palette.muted, inset, y, textWidth, keySize.Height);
                     Draw(g, key.Substring(separator + 1), palette.keys, palette.muted, inset, y + keySize.Height, textWidth, keySize.Height);
                 }
                 else
-                    Draw(g, key, palette.keys, palette.muted, inset, y, textWidth, keyHeight);
+                    Draw(g, key, palette.keys, palette.muted, inset, y, textWidth, keySize.Height);
             }
 
             private static Size Measure(Graphics g, string text, Font font)
@@ -401,7 +484,7 @@ namespace PairTap
         private static GraphicsPath RoundedRectangle(float width, float height, float radius)
         {
             var path = new GraphicsPath();
-            float d = radius * 2;
+            float d = Math.Max(1, Math.Min(Math.Min(width, height), radius * 2));
             path.AddArc(1, 1, d, d, 180, 90);
             path.AddArc(width - d, 1, d, d, 270, 90);
             path.AddArc(width - d, height - d, d, d, 0, 90);

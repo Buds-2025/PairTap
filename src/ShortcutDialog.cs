@@ -4,7 +4,7 @@ using System.Windows.Forms;
 
 namespace PairTap
 {
-    internal sealed class ShortcutDialog : Form
+    internal sealed class ShortcutDialog : DpiForm
     {
         private readonly ListView list;
         private readonly KeyCapture capture;
@@ -12,26 +12,27 @@ namespace PairTap
         private readonly Button clear, save;
         private readonly Func<Keys[], PunctuationPreference, string> commit;
         private readonly ComboBox shape;
-        private readonly Font interfaceFont = new Font("Microsoft YaHei UI", 9);
+        private readonly TableLayoutPanel layout, editor;
+        private readonly FlowLayoutPanel style;
+        private readonly Label instructions, styleLabel;
+        private Font interfaceFont;
+        private double fontDensity;
+        private readonly int[] columnMinimums = new int[3];
         private Keys[] draft;
         internal bool Committed { get; private set; }
 
         internal ShortcutDialog(Keys[] current, PunctuationPreference preference, Icon icon,
             Func<Keys[], PunctuationPreference, string> commit)
+            : base(new Size(602, 542), new Size(500, 340))
         {
             draft = (Keys[])current.Clone();
             this.commit = commit;
-            AutoScaleDimensions = new SizeF(96, 96);
-            AutoScaleMode = AutoScaleMode.Dpi;
             Text = Product.ChineseName + " · 快捷键设置";
             Icon = icon;
-            Font = interfaceFont;
-            StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(520, 490);
-            ClientSize = new Size(602, 542);
             MinimizeBox = false;
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1, RowCount = 6 };
+            layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -39,14 +40,16 @@ namespace PairTap
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             Controls.Add(layout);
-            layout.Controls.Add(new Label {
-                AutoSize = true, Margin = new Padding(3, 2, 3, 12),
+            instructions = new Label {
+                AutoSize = true,
                 Text = "选择一项，在录入框按下组合键。清除可禁用，保存后生效。"
-            }, 0, 0);
+            };
+            layout.Controls.Add(instructions, 0, 0);
 
-            var style = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-            style.Controls.Add(new Label { Text = "“跟随样式”项的标点", AutoSize = true, Margin = new Padding(3, 6, 12, 6) });
-            shape = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 158, AccessibleName = "标点样式" };
+            style = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
+            styleLabel = new Label { Text = "“跟随样式”项的标点", AutoSize = true };
+            style.Controls.Add(styleLabel);
+            shape = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "标点样式" };
             shape.Items.AddRange(new object[] { "自动识别输入法", "固定中文标点", "固定半角标点", "固定全角标点" });
             shape.SelectedIndex = (int)preference;
             style.Controls.Add(shape);
@@ -60,7 +63,7 @@ namespace PairTap
             list.Columns.Add("操作", 196);
             list.Columns.Add("符号", 94);
             list.Columns.Add("全局快捷键", 175);
-            list.Resize += (sender, args) => list.Columns[2].Width = Math.Max(145, list.ClientSize.Width - 291);
+            list.Resize += (sender, args) => FitColumns();
             for (int i = 0; i < Shortcut.All.Length; i++)
             {
                 Shortcut entry = Shortcut.All[i];
@@ -73,12 +76,13 @@ namespace PairTap
             {
                 for (int i = 0; i < Shortcut.All.Length; i++)
                     list.Items[i].SubItems[1].Text = SymbolPreview(Shortcut.All[i]);
+                MeasureColumns();
             };
             list.SelectedIndexChanged += (sender, args) => RefreshCapture();
             list.DoubleClick += (sender, args) => capture.Focus();
             layout.Controls.Add(list, 0, 2);
 
-            var editor = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, Margin = new Padding(0, 12, 0, 0) };
+            editor = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3 };
             editor.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             editor.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             editor.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -90,7 +94,7 @@ namespace PairTap
             clear.Click += (sender, args) => SetShortcut(Keys.None);
             editor.Controls.Add(clear, 2, 0);
             layout.Controls.Add(editor, 0, 3);
-            status = new Label { AutoSize = true, Margin = new Padding(3, 5, 3, 9), Dock = DockStyle.Fill, AccessibleName = "快捷键设置状态" };
+            status = new Label { AutoSize = true, Dock = DockStyle.Fill, AccessibleName = "快捷键设置状态" };
             layout.Controls.Add(status, 0, 4);
 
             var actions = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
@@ -103,6 +107,7 @@ namespace PairTap
                 draft = ShortcutSettings.Defaults();
                 shape.SelectedIndex = (int)PunctuationPreference.Auto;
                 for (int i = 0; i < draft.Length; i++) list.Items[i].SubItems[2].Text = Display(draft[i]);
+                MeasureColumns();
                 RefreshCapture();
                 status.Text = "已恢复默认值，保存后生效。";
             };
@@ -114,6 +119,73 @@ namespace PairTap
             if (!SystemInformation.HighContrast && Palette.DarkTheme) ApplyDarkTheme(clear, save, cancel, reset);
             Shown += (sender, args) => { list.Items[0].Selected = true; list.Focus(); };
             RefreshCapture();
+        }
+
+        protected override void LayoutForDisplay()
+        {
+            layout.SuspendLayout();
+            if (fontDensity != Density)
+            {
+                Font previous = interfaceFont;
+                interfaceFont = PixelFont("Microsoft YaHei UI", 9);
+                Font = interfaceFont;
+                if (previous != null) previous.Dispose();
+                fontDensity = Density;
+            }
+            layout.Padding = new Padding(Px(20));
+            int gap = Px(3);
+            instructions.Margin = new Padding(gap, Px(2), gap, Px(12));
+            styleLabel.Margin = new Padding(gap, Px(6), Px(12), Px(6));
+            editor.Margin = new Padding(0, Px(12), 0, 0);
+            status.Margin = new Padding(gap, Px(5), gap, Px(9));
+            foreach (Control control in new Control[] { style, shape, list, capture, clear, save, CancelButton as Control })
+                control.Margin = new Padding(gap);
+            shape.Width = Px(158);
+            shape.DropDownWidth = shape.Width;
+            FitLabels();
+            MeasureColumns();
+            layout.ResumeLayout();
+            Invalidate(true);
+        }
+
+        protected override void OnClientSizeChanged(EventArgs e)
+        {
+            base.OnClientSizeChanged(e);
+            if (interfaceFont != null) FitLabels();
+        }
+
+        private void FitLabels()
+        {
+            int width = Math.Max(1, ClientSize.Width - layout.Padding.Horizontal - 2 * Px(3));
+            instructions.MaximumSize = status.MaximumSize = new Size(width, 0);
+        }
+
+        private void FitColumns()
+        {
+            if (interfaceFont == null || list.Columns.Count != 3) return;
+            int extra = Math.Max(0, list.ClientSize.Width - 1 - columnMinimums[0] - columnMinimums[1] - columnMinimums[2]);
+            list.Columns[0].Width = columnMinimums[0] + extra * 2 / 5;
+            list.Columns[1].Width = columnMinimums[1] + extra / 5;
+            list.Columns[2].Width = columnMinimums[2] + extra - extra * 2 / 5 - extra / 5;
+        }
+
+        private void MeasureColumns()
+        {
+            if (interfaceFont == null) return;
+            int padding = 2 * Px(7);
+            const TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+            using (Graphics graphics = list.CreateGraphics())
+            {
+                for (int column = 0; column < list.Columns.Count; column++)
+                {
+                    int width = TextRenderer.MeasureText(graphics, list.Columns[column].Text, interfaceFont, Size.Empty, flags).Width;
+                    foreach (ListViewItem item in list.Items)
+                        width = Math.Max(width, TextRenderer.MeasureText(graphics, item.SubItems[column].Text,
+                            interfaceFont, Size.Empty, flags).Width);
+                    columnMinimums[column] = width + padding;
+                }
+            }
+            FitColumns();
         }
 
         private void ApplyDarkTheme(params Button[] buttons)
@@ -132,16 +204,16 @@ namespace PairTap
             {
                 Color row = args.Item.Selected ? Color.FromArgb(43, 70, 108) : surface;
                 using (var fill = new SolidBrush(row)) args.Graphics.FillRectangle(fill, args.Bounds);
-                var textBounds = Rectangle.Inflate(args.Bounds, -7, 0);
+                var textBounds = Rectangle.Inflate(args.Bounds, -Px(7), 0);
                 TextRenderer.DrawText(args.Graphics, args.SubItem.Text, Font, textBounds, ForeColor,
-                    TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
             };
             list.DrawColumnHeader += (sender, args) =>
             {
                 using (var fill = new SolidBrush(surface)) args.Graphics.FillRectangle(fill, args.Bounds);
                 using (var rule = new Pen(border))
                     args.Graphics.DrawLine(rule, args.Bounds.Left, args.Bounds.Bottom - 1, args.Bounds.Right, args.Bounds.Bottom - 1);
-                var textBounds = Rectangle.Inflate(args.Bounds, -7, 0);
+                var textBounds = Rectangle.Inflate(args.Bounds, -Px(7), 0);
                 TextRenderer.DrawText(args.Graphics, args.Header.Text, Font, textBounds, ForeColor, TextFormatFlags.VerticalCenter);
             };
             foreach (Button button in buttons)
@@ -155,7 +227,7 @@ namespace PairTap
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            if (disposing) interfaceFont.Dispose();
+            if (disposing && interfaceFont != null) interfaceFont.Dispose();
         }
 
         protected override void OnHandleCreated(EventArgs args)
@@ -208,6 +280,7 @@ namespace PairTap
             }
             draft[index] = keys;
             list.Items[index].SubItems[2].Text = Display(keys);
+            MeasureColumns();
             RefreshCapture();
             status.Text = keys == Keys.None ? "已清除这项快捷键，保存后禁用。" : "已录入组合键，保存后生效。";
         }

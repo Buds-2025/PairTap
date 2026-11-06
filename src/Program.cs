@@ -17,8 +17,6 @@ namespace PairTap
 {
     internal static class Program
     {
-        [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
-
         [STAThread]
         private static void Main()
         {
@@ -32,7 +30,6 @@ namespace PairTap
                     openEvent.Set();
                     return;
                 }
-                SetProcessDPIAware();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 using (var context = new TrayApp(openEvent)) Application.Run(context);
@@ -139,6 +136,7 @@ namespace PairTap
             }
             Palette previous = palette;
             var dialog = new ShortcutDialog(bindings, preference, icon, SaveShortcuts);
+            dialog.OpenOn(previous == null ? Screen.FromPoint(Cursor.Position) : Screen.FromControl(previous));
             UnregisterShortcuts();
             shortcutDialog = dialog;
             dialog.FormClosed += (sender, args) =>
@@ -251,6 +249,7 @@ namespace PairTap
                 CurrentShape(target, Native.KeyboardLayout(target.Focus));
             Palette previous = palette;
             var window = new Palette(bindings, shape, available.Contains(1), icon);
+            window.OpenOn(target == null ? Screen.FromPoint(Cursor.Position) : Screen.FromHandle(target.Window));
             palette = window;
             window.Configure += () => HandleTrayCommand(TrayCommand.Settings);
             if (target != null) window.Chosen += pair =>
