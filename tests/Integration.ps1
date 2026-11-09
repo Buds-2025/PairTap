@@ -11,6 +11,8 @@ public static class TestKeys
     [DllImport("user32.dll")] private static extern void mouse_event(uint flags, int x, int y, int data, UIntPtr extra);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr handle);
+    [DllImport("user32.dll")] public static extern bool CloseClipboard();
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr handle, out Rect bounds);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
@@ -422,6 +424,10 @@ try {
 <input id="locked" value="只读选区" readonly>
 <div id="rich" contenteditable="true"><p>甲<span>富文本AbC</span>乙</p></div>
 <div id="multi" contenteditable="true"><p>甲文本</p><p>AbC乙</p></div>
+<input id="no-copy" value="甲中🙂Ab乙">
+<input id="no-paste" value="甲中🙂Ab乙">
+<input id="locked-clipboard" value="甲中🙂Ab乙">
+<input id="max-length" maxlength="7" value="甲中🙂Ab乙">
 <script>
 const editor = document.getElementById('editor');
 editor.addEventListener('mouseup', () => {
@@ -476,6 +482,24 @@ multi.addEventListener('input', () => {
         ? 'PairTap multiline selection passed'
         : 'PairTap multiline selection mismatch';
 });
+for (const id of ['no-copy', 'no-paste', 'locked-clipboard', 'max-length']) {
+    const field = document.getElementById(id);
+    field.addEventListener('focus', () => {
+        field.setSelectionRange(1, 6);
+        document.title = id + ' selected';
+    });
+    if (id !== 'locked-clipboard') {
+        field.addEventListener(id === 'no-paste' ? 'paste' : 'copy', event => {
+            event.preventDefault();
+            document.title = id + ' blocked';
+        });
+    }
+    field.addEventListener('input', () => {
+        document.title = ['甲《中🙂Ab》乙', '甲<中🙂Ab>乙', '甲＜中🙂Ab＞乙'].includes(field.value)
+            ? id + ' wrapped once'
+            : id + ' pending input';
+    });
+}
 </script>
 '@ | Set-Content -LiteralPath $page -Encoding UTF8
         $browserArguments = @(
@@ -544,6 +568,47 @@ multi.addEventListener('input', () => {
                 [TestKeys]::Symbol(0xBC)
                 Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'PairTap multiline selection passed*' } 2000) "browser wraps across paragraphs (actual $($browser.MainWindowTitle))"
                 Assert (Wait-Condition { [Windows.Forms.Clipboard]::GetText() -ceq 'Clipboard fixture' } 1300) 'browser multiline editor restores the clipboard'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'no-copy selected*' } 1000) 'copy-blocking editor has a verified selection'
+                $sequence = $sequenceMethod.Invoke($null, @())
+                [TestKeys]::Symbol(0xBC)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'no-copy wrapped once*' } 2600) "direct input wraps Chinese, emoji and Latin text (actual $($browser.MainWindowTitle))"
+                Assert ($sequenceMethod.Invoke($null, @()) -eq $sequence) 'direct input leaves the clipboard untouched'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'no-paste selected*' } 1000) 'paste-blocking editor has a verified selection'
+                [TestKeys]::Symbol(0xBC)
+                Pump 1300
+                $browser.Refresh()
+                Assert ($browser.MainWindowTitle -like 'no-paste blocked*') 'a paste attempt does not also send Unicode input'
+                [TestKeys]::Symbol(0xBC)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'no-paste wrapped once*' } 2000) "the next shortcut types instead of pasting (actual $($browser.MainWindowTitle))"
+                Pump 200
+                $browser.Refresh()
+                Assert ($browser.MainWindowTitle -like 'no-paste wrapped once*') 'paste fallback finishes with exactly one pair'
+                Assert ([Windows.Forms.Clipboard]::GetText() -ceq 'Clipboard fixture') 'paste rejection and typing preserve the clipboard'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'locked-clipboard selected*' } 1000) 'another editor has a verified selection'
+                $sequence = $sequenceMethod.Invoke($null, @())
+                Assert ([TestKeys]::OpenClipboard($form.Handle)) 'fixture can keep the clipboard busy'
+                try {
+                    [TestKeys]::Symbol(0xBC)
+                    Assert (Wait-Condition {
+                        $browser.Refresh()
+                        $browser.MainWindowTitle -like 'locked-clipboard wrapped once*'
+                    } 2200) 'direct input works when the clipboard cannot be opened'
+                }
+                finally { [void][TestKeys]::CloseClipboard() }
+                Assert ($sequenceMethod.Invoke($null, @()) -eq $sequence) 'busy clipboard is left untouched'
+
+                [TestKeys]::Stroke(0x09)
+                Assert (Wait-Condition { $browser.Refresh(); $browser.MainWindowTitle -like 'max-length selected*' } 1000) 'length-limited editor has a verified selection'
+                [TestKeys]::Symbol(0xBC)
+                Pump 1600
+                $browser.Refresh()
+                Assert ($browser.MainWindowTitle -like 'max-length blocked*') 'a full field keeps the original text during direct input'
             }
         }
         finally {

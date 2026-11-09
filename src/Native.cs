@@ -226,6 +226,21 @@ namespace PairTap
             return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input))) == inputs.Length;
         }
 
+        internal static bool TypeUnicode(Target target, string text)
+        {
+            const uint unicode = 0x0004, keyUp = 0x0002;
+            var inputs = new Input[text.Length * 2];
+            for (int i = 0; i < text.Length; i++)
+            {
+                inputs[i * 2] = new Input { Type = 1, Data = new InputData {
+                    Keyboard = new Keyboard { Scan = text[i], Flags = unicode } } };
+                inputs[i * 2 + 1] = new Input { Type = 1, Data = new InputData {
+                    Keyboard = new Keyboard { Scan = text[i], Flags = unicode | keyUp } } };
+            }
+            return target.IsCurrent && !ModifiersDown &&
+                SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input))) == inputs.Length;
+        }
+
         private static Input Key(Keys key, bool up)
         {
             return new Input { Type = 1, Data = new InputData { Keyboard = new Keyboard { Key = (ushort)key, Flags = up ? 2u : 0u } } };
@@ -248,6 +263,11 @@ namespace PairTap
         {
             get { return Window != IntPtr.Zero && Focus != IntPtr.Zero && ProcessId != 0 &&
                 Native.GetForegroundWindow() == Window && Native.ProcessId(Window) == ProcessId && Native.Focus(Window) == Focus; }
+        }
+
+        internal bool SameControl(Target other)
+        {
+            return other != null && Window == other.Window && Focus == other.Focus && ProcessId == other.ProcessId;
         }
     }
 }
