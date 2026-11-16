@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using Accessibility;
 
 namespace PairTap
@@ -13,6 +14,7 @@ namespace PairTap
         private const int Blocked = 0x1 | 0x40 | 0x20000000; // Unavailable, read-only, protected.
         private const int Editable = 0x8, DefunctOrStale = 0x4 | 0x4000;
         private const int MaxText = 2 * 1024 * 1024;
+        private const int DirectTextLimit = 64 * 1024;
         private const int RendererLimit = 8;
         private const char EmbeddedObject = '\uFFFC';
 
@@ -26,6 +28,31 @@ namespace PairTap
             internal int Id, Start, End;
         }
 
+        private sealed class TextRun
+        {
+            internal IAccessibleText Provider;
+            internal Span Node;
+            internal int Start, End, Offset;
+        }
+
+        private sealed class TextSnapshot
+        {
+            internal readonly StringBuilder Value = new StringBuilder();
+            internal readonly List<TextRun> Runs = new List<TextRun>();
+            internal readonly HashSet<int> Nodes = new HashSet<int>();
+            internal int Start = -1, End = -1, SelectedLength;
+
+            internal TextRun RunAt(int offset, bool previous)
+            {
+                foreach (TextRun run in Runs)
+                {
+                    if (previous ? run.Start < offset && offset <= run.End :
+                        run.Start <= offset && offset < run.End) return run;
+                }
+                return null;
+            }
+        }
+
         private AccessibleSelection(string text, List<Span> spans, IAccessible editor)
         {
             Text = text;
@@ -37,6 +64,232 @@ namespace PairTap
         {
             try { return editor.get_accValue(Self); }
             catch (COMException) { return null; }
+        }
+
+        internal string EditorIdentity { get { return "ia2:" + spans[0].Window + ":" + spans[0].Id; } }
+        internal bool HasNestedText { get { return spans.Count > 1; } }
+        internal int DirectStart { get; private set; }
+        internal int DirectEnd { get; private set; }
+
+        internal string ObserveDirectText()
+        {
+            TextSnapshot snapshot = ReadDirectSnapshot(true);
+            if (snapshot == null || snapshot.SelectedLength != Text.Length) return null;
+            string value = snapshot.Value.ToString();
+            if (!MatchesDirectSelection(value, Text, snapshot.Start, snapshot.End)) return null;
+            DirectStart = snapshot.Start;
+            DirectEnd = snapshot.End;
+            return value;
+        }
+
+        private static bool MatchesDirectSelection(string field, string selected, int start, int end)
+        {
+            return field != null && field.Length <= DirectTextLimit && start >= 0 && end > start && end <= field.Length &&
+                IsCharacterBoundary(field, start) && IsCharacterBoundary(field, end) &&
+                string.Equals(field.Substring(start, end - start), selected, StringComparison.Ordinal);
+        }
+
+        private static bool IsCharacterBoundary(string field, int offset)
+        {
+            return offset == 0 || offset == field.Length ||
+                !char.IsSurrogatePair(field[offset - 1], field[offset]);
+        }
+
+        internal string ReadDirectText()
+        {
+            TextSnapshot snapshot = ReadDirectSnapshot(false);
+            return snapshot == null ? null : snapshot.Value.ToString();
+        }
+
+        private TextSnapshot ReadDirectSnapshot(bool withSelection)
+        {
+            var snapshot = new TextSnapshot();
+            try
+            {
+                if (AppendDirectText(editor, snapshot, withSelection, 0)) return snapshot;
+            }
+            catch (COMException) { }
+            catch (InvalidCastException) { }
+            catch (ArgumentException) { }
+            return null;
+        }
+
+        private bool AppendDirectText(IAccessible node, TextSnapshot snapshot, bool withSelection, int depth)
+        {
+            if (node == null || depth == 8 || snapshot.Nodes.Count >= 64) return false;
+            var identity = Query<IAccessible2>(node);
+            object state = node.get_accState(Self);
+            if (identity == null || !(state is int) || ((int)state & Blocked) != 0) return false;
+            int ia2State = identity.GetStates();
+            Span current = new Span { Id = identity.GetUniqueId(), Window = identity.GetWindowHandle() };
+            if ((ia2State & DefunctOrStale) != 0 || current.Id == 0 || current.Window != spans[0].Window ||
+                !snapshot.Nodes.Add(current.Id) ||
+                depth == 0 && (current.Id != spans[0].Id || (ia2State & Editable) == 0)) return false;
+            var text = Query<IAccessibleText>(node);
+            if (text == null) return false;
+            int count = text.GetCharacterCount();
+            if (count < 0 || count > DirectTextLimit + 2) return false;
+            if (count == 0) return true;
+            string value = text.GetText(0, count);
+            if (value == null || value.Length != count) return false;
+            Span selected = withSelection ? spans.Find(span => span.Id == current.Id && span.Window == current.Window) : new Span();
+
+            // An IA2 embedded object occupies one unit in the parent but has its own offsets.
+            // Record the owner of each text run so a boundary can be applied to its exact node.
+            int offset = 0;
+            while (offset < value.Length)
+            {
+                int marker = value.IndexOf(EmbeddedObject, offset);
+                int end = marker < 0 ? value.Length : marker;
+                int length = end - offset;
+                int start = snapshot.Value.Length;
+                if (start + length > DirectTextLimit + 2) return false;
+                if (length > 0)
+                {
+                    snapshot.Value.Append(value, offset, length);
+                    snapshot.Runs.Add(new TextRun { Provider = text, Node = current, Start = start,
+                        End = start + length, Offset = offset });
+                    int first = Math.Max(offset, selected.Start), last = Math.Min(end, selected.End);
+                    if (selected.Id != 0 && first < last)
+                    {
+                        if (snapshot.Start < 0) snapshot.Start = start + first - offset;
+                        snapshot.End = start + last - offset;
+                        snapshot.SelectedLength += last - first;
+                    }
+                }
+                if (marker < 0) break;
+                var hypertext = text as IAccessibleHypertext;
+                int child = hypertext == null ? -1 : hypertext.GetHyperlinkIndex(marker);
+                if (child < 0 || !AppendDirectText(hypertext.GetHyperlink(child) as IAccessible,
+                    snapshot, withSelection, depth + 1)) return false;
+                offset = marker + 1;
+            }
+            return true;
+        }
+
+        internal bool TryGetFlatOffsets(string value, out int start, out int end)
+        {
+            start = spans[0].Start;
+            end = spans[0].End;
+            if (spans.Count != 1 || value == null || end > value.Length ||
+                !string.Equals(value.Substring(start, end - start), Text, StringComparison.Ordinal)) return false;
+            try
+            {
+                var text = Query<IAccessibleText>(editor);
+                return text != null && string.Equals(text.GetText(0, -1), value, StringComparison.Ordinal);
+            }
+            catch (COMException) { return false; }
+        }
+
+        internal bool IsPlainHtmlInput(string value, bool focused)
+        {
+            var identity = Query<IAccessible2>(editor);
+            if (identity == null || identity.GetUniqueId() != spans[0].Id ||
+                identity.GetWindowHandle() != spans[0].Window ||
+                (identity.GetStates() & (Editable | DefunctOrStale)) != Editable) return false;
+            object state = editor.get_accState(Self);
+            int expected = focused ? Focused : 0;
+            if (!(state is int) || ((int)state & (Blocked | Focused)) != expected ||
+                !string.Equals(ReadValue(), value, StringComparison.Ordinal)) return false;
+            return HasPlainInputTag(identity.GetAttributes());
+        }
+
+        private static bool HasPlainInputTag(string attributes)
+        {
+            if (attributes == null) return false;
+            string tag = null;
+            int start = 0;
+            for (int i = 0; i <= attributes.Length; i++)
+            {
+                if (i < attributes.Length && attributes[i] != ';')
+                {
+                    if (attributes[i] == '\\') i++;
+                    continue;
+                }
+                if (i - start >= 4 && string.CompareOrdinal(attributes, start, "tag:", 0, 4) == 0)
+                {
+                    if (tag != null) return false;
+                    tag = attributes.Substring(start + 4, i - start - 4);
+                }
+                start = i + 1;
+            }
+            return tag == "input" || tag == "textarea";
+        }
+
+        internal bool RestorePlainHtmlInput(Target target, string expected, string original, Task deadline)
+        {
+            IntPtr editorWindow = spans[0].Window;
+            if (!target.IsAlive || Native.RootWindow(editorWindow) != target.Window ||
+                Native.ProcessId(editorWindow) != target.ProcessId || !IsPlainHtmlInput(expected, false) ||
+                !string.Equals(ReadValue(), expected, StringComparison.Ordinal) || deadline.IsCompleted || !target.IsAlive)
+                return false;
+            // The original HTML input still contains exactly the text plus our delimiter.
+            // Set its value directly because keyboard input now belongs to a different element.
+            editor.set_accValue(Self, original);
+            return true;
+        }
+
+        internal async Task<bool> SelectAndApply(Target target, string expected, int start, int end,
+            bool requireOriginalSelection, Task deadline, Func<bool> edit)
+        {
+            if (!IsFocusedWritable(target)) return false;
+            TextSnapshot snapshot = ReadDirectSnapshot(requireOriginalSelection);
+            if (snapshot == null || !string.Equals(snapshot.Value.ToString(), expected, StringComparison.Ordinal) ||
+                requireOriginalSelection && (snapshot.Start != DirectStart || snapshot.End != DirectEnd ||
+                    snapshot.SelectedLength != Text.Length || !HasOriginalSelection())) return false;
+            TextRun run = snapshot.RunAt(start, requireOriginalSelection);
+            if (run == null || end > run.End) return false;
+            int localStart = run.Offset + start - run.Start, localEnd = run.Offset + end - run.Start;
+            var text = run.Provider;
+            int selectionCount = text.GetSelectionCount();
+            if (selectionCount < 0 || selectionCount > 1) return false;
+            if (deadline.IsCompleted || !target.IsCurrent || Native.ModifiersDown) return false;
+            if (selectionCount != 0) text.SetSelection(0, localStart, localEnd);
+            else if (start == end) text.SetCaretOffset(localStart);
+            else text.AddSelection(localStart, localEnd);
+            while (!deadline.IsCompleted && target.IsCurrent && !Native.ModifiersDown)
+            {
+                if (MatchesSelection(text, localStart, localEnd) && SameTextRun(expected, start, requireOriginalSelection, run) &&
+                    MatchesSelection(text, localStart, localEnd) && IsFocusedWritable(target) &&
+                    !deadline.IsCompleted && target.IsCurrent && !Native.ModifiersDown)
+                    return edit();
+                await Task.Delay(15).ConfigureAwait(false);
+            }
+            return false;
+        }
+
+        private bool HasOriginalSelection()
+        {
+            var currentSpans = new List<Span>();
+            var currentText = new StringBuilder();
+            return ReadRange(editor, Query<IAccessible2>(editor), currentSpans, currentText, 0) &&
+                string.Equals(currentText.ToString(), Text, StringComparison.Ordinal) && SameRange(currentSpans);
+        }
+
+        private bool SameTextRun(string expected, int offset, bool previous, TextRun original)
+        {
+            TextSnapshot current = ReadDirectSnapshot(false);
+            if (current == null || !string.Equals(current.Value.ToString(), expected, StringComparison.Ordinal)) return false;
+            TextRun run = current.RunAt(offset, previous);
+            return run != null && run.Node.Id == original.Node.Id && run.Node.Window == original.Node.Window &&
+                run.Start == original.Start && run.End == original.End && run.Offset == original.Offset;
+        }
+
+        private bool IsFocusedWritable(Target target)
+        {
+            if (!target.IsCurrent || Native.ModifiersDown) return false;
+            object state = editor.get_accState(Self);
+            return state is int && ((int)state & (Focused | Blocked)) == Focused;
+        }
+
+        private static bool MatchesSelection(IAccessibleText text, int start, int end)
+        {
+            int count = text.GetSelectionCount();
+            if (count == 0) return start == end && text.GetCaretOffset() == start;
+            int actualStart, actualEnd;
+            // The renderer can collapse the selection between these two COM calls.
+            return count == 1 && text.GetSelection(0, out actualStart, out actualEnd) == 0 &&
+                actualStart == start && actualEnd == end;
         }
 
         internal static AccessibleSelection Read(Target target)
@@ -83,10 +336,15 @@ namespace PairTap
 
         internal bool SameRange(AccessibleSelection other)
         {
-            if (spans.Count != other.spans.Count) return false;
+            return SameRange(other.spans);
+        }
+
+        private bool SameRange(List<Span> other)
+        {
+            if (spans.Count != other.Count) return false;
             for (int i = 0; i < spans.Count; i++)
             {
-                Span left = spans[i], right = other.spans[i];
+                Span left = spans[i], right = other[i];
                 if (left.Window != right.Window || left.Id != right.Id || left.Start != right.Start || left.End != right.End)
                     return false;
             }
@@ -129,9 +387,9 @@ namespace PairTap
             if (!(state is int) || ((int)state & Blocked) != 0) return false;
             var selection = Query<IAccessibleText>(node);
             if (selection == null || selection.GetSelectionCount() != 1) return false;
-            int start;
-            int end = selection.GetSelection(0, out start);
-            if (start < 0 || end <= start || end - start > MaxText) return false;
+            int start, end;
+            if (selection.GetSelection(0, out start, out end) != 0 ||
+                start < 0 || end <= start || end - start > MaxText) return false;
             string part = selection.GetText(start, end);
             if (string.IsNullOrEmpty(part) || part.Length > MaxText - text.Length) return false;
             int id = identity.GetUniqueId();
@@ -204,19 +462,25 @@ namespace PairTap
             void _VtblGap2_5();
             int GetUniqueId();
             IntPtr GetWindowHandle();
+            void _VtblGap3_2();
+            [return: MarshalAs(UnmanagedType.BStr)] string GetAttributes();
         }
 
         [ComImport, Guid("24FD2FFB-3AAD-4A08-8335-A3AD89C0FB4B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         private interface IAccessibleText
         {
-            void UnusedAddSelection();
+            void AddSelection(int start, int end);
             void UnusedGetAttributes();
-            void UnusedGetCaretOffset();
+            int GetCaretOffset();
             void UnusedGetCharacterExtents();
             int GetSelectionCount();
             void UnusedGetOffsetAtPoint();
-            int GetSelection(int index, out int start);
+            [PreserveSig] int GetSelection(int index, out int start, out int end);
             [return: MarshalAs(UnmanagedType.BStr)] string GetText(int start, int end);
+            void _VtblGap1_4();
+            void SetCaretOffset(int offset);
+            void SetSelection(int index, int start, int end);
+            int GetCharacterCount();
         }
 
         // The first 19 slots are inherited from IAccessibleText.

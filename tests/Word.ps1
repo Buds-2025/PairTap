@@ -10,19 +10,43 @@ try {
     $document = $word.Documents.Add()
     $word.Visible = $true
     $document.Activate()
+    if ($document.ActiveWindow.WindowState -eq 2) { $document.ActiveWindow.WindowState = 0 }
+    # A navigation pane restored from an earlier Word session can retain keyboard focus.
+    $document.ActiveWindow.DocumentMap = $false
     Pump 500
-    $wordWindow = (Get-Process WINWORD).MainWindowHandle
-    $wordId = (Get-Process WINWORD).Id
-    for ($attempt = 0; $attempt -lt 8; $attempt++) {
-        [void][TestKeys]::SetForegroundWindow($wordWindow)
-        Pump 150
-        if ([TestKeys]::Owner([TestKeys]::GetForegroundWindow()) -eq $wordId) { break }
-        [TestKeys]::Stroke(0x12)
-    }
+    $wordProcess = Get-Process WINWORD
+    $wordId = $wordProcess.Id
+    $focused = Wait-Condition {
+        $window = [TestKeys]::FindEditorWindow($wordId, '_WwG')
+        if ($window -eq [IntPtr]::Zero) { return $false }
+        [TestKeys]::RaiseFixture($window, $true)
+        [TestKeys]::FocusFixture($window)
+    } 4500
+    $wordWindow = [TestKeys]::FindEditorWindow($wordId, '_WwG')
     $front = Get-Process -Id ([TestKeys]::Owner([TestKeys]::GetForegroundWindow()))
-    Assert ($front.Id -eq $wordId) "Word document focused (foreground $($front.ProcessName))"
+    Assert ($focused -and $front.Id -eq $wordId) "Word document focused (foreground $($front.ProcessName))"
     $document.Content.Text = 'prefix AbC suffix'
     $document.Range(7, 10).Bold = 1
+    $document.Range(7, 10).Select()
+    $document.ActiveWindow.ActivePane.Activate()
+    $native = $assembly.GetType('PairTap.Native')
+    $methods = [Reflection.BindingFlags]'Static,NonPublic'
+    $focusWindow = $native.GetMethod('Focus', $methods)
+    $className = $native.GetMethod('ClassName', $methods)
+    $editorReady = $false
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        if ([TestKeys]::GetForegroundWindow() -ne $wordWindow) { break }
+        [void][TestKeys]::FocusEditor($wordWindow, '_WwG')
+        Pump 150
+        $editorWindow = $focusWindow.Invoke($null, @($wordWindow))
+        if ($className.Invoke($null, @($editorWindow)) -eq '_WwG') { $editorReady = $true; break }
+        [TestKeys]::Stroke(0x75) # F6 cycles through Word panes without editing the document.
+        Pump 150
+    }
+    $actualFocus = $focusWindow.Invoke($null, @($wordWindow))
+    $actualClass = $className.Invoke($null, @($actualFocus))
+    Assert $editorReady "Word document editing surface receives focus (focus class: $actualClass, window: $actualFocus)"
+    [TestKeys]::RaiseFixture($wordWindow, $false)
     $document.Range(7, 10).Select()
     $before = $sequenceMethod.Invoke($null,@())
     [TestKeys]::Symbol(0x39)

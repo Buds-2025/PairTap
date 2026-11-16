@@ -2,7 +2,6 @@ using System;
 using System.ComponentModel;
 using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Automation;
 using System.Windows.Automation.Text;
@@ -29,7 +28,7 @@ namespace PairTap
         internal const string NoSelection = "请先选中要包裹的文字。";
         private const string UnavailableSelection = "当前控件未提供可核验的选区。";
         private const string ReadOnlySelection = "当前选区为只读或包含受保护内容。";
-        private static int probing;
+        private static readonly ProviderWork providers = new ProviderWork();
         private static Target clipboardRejected;
         private static string clipboardRejectedEditor;
 
@@ -40,7 +39,12 @@ namespace PairTap
             if (!target.IsCurrent) return "输入焦点已变化，请重新选中文字。";
 
             string className = Native.ClassName(target.Focus);
-            if (className == "_WwG") return await WordSelection.Apply(target, pair);
+            if (className == "_WwG")
+            {
+                target.Backend = "word";
+                target.Stage = "edit";
+                return await WordSelection.Apply(target, pair);
+            }
 
             string rootClass = Native.ClassName(target.Window);
             if (rootClass == "ConsoleWindowClass" || rootClass == "CASCADIA_HOSTING_WINDOW_CLASS")
@@ -66,6 +70,8 @@ namespace PairTap
                             Native.EditSelection(target.Focus) != positions || !target.IsCurrent || Native.ModifiersDown)
                             return "选区已变化，请重新选中文字。";
                         string replacement = pair.Left + text.Substring(start, end - start) + pair.Right;
+                        target.Backend = "native-edit";
+                        target.Stage = "replace";
                         return Native.ReplaceEditSelection(target.Focus, replacement) ? null : "当前输入框无法替换选区。";
                     }
                 }
@@ -74,6 +80,7 @@ namespace PairTap
             Selection verified = null;
             if (!positions.HasValue)
             {
+                target.Stage = "probe";
                 verified = await Probe(target, null);
                 if (verified.Error != null) return verified.Error;
             }
@@ -96,31 +103,29 @@ namespace PairTap
             internal string Error, Text;
             internal AutomationElement Element, Provider;
             internal TextPatternRange Range;
+            internal TextPattern Pattern;
             internal ValuePattern Value;
             internal string OriginalValue;
+            internal int? StartOffset, EndOffset;
             internal AccessibleSelection Accessible;
+            internal string AccessibleText;
+            internal AccessibleSelection PlainHtmlInput;
             internal bool VerifiedWritable;
             internal string EditorIdentity;
         }
 
-        private static async Task<Selection> Probe(Target target, Selection previous)
+        private static async Task<Selection> Probe(Target target, Selection previous, bool direct = false)
         {
-            if (Interlocked.CompareExchange(ref probing, 1, 0) != 0)
-                return new Selection { Error = "输入控件暂未响应，无法确认选区。" };
-            Task<Selection> work = Task.Run(() =>
+            Task<Selection> work = providers.TryStart(target.Window, target.ProcessId, () =>
             {
-                try
-                {
-                    if (previous != null && previous.Accessible != null)
-                        return CheckAccessibleSelection(target, previous);
-                    Selection result = CheckSelection(target, previous);
-                    if (previous == null && result.Error == UnavailableSelection)
-                        return CheckAccessibleSelection(target, null);
-                    return result;
-                }
-                finally { Interlocked.Exchange(ref probing, 0); }
+                if (previous != null && previous.Accessible != null)
+                    return Task.FromResult(CheckAccessibleSelection(target, previous, direct));
+                Selection result = CheckSelection(target, previous);
+                if (previous == null && result.Error == UnavailableSelection)
+                    result = CheckAccessibleSelection(target, null, direct);
+                return Task.FromResult(result);
             });
-            if (await Task.WhenAny(work, Task.Delay(800)) != work)
+            if (work == null || await Task.WhenAny(work, Task.Delay(800)) != work)
                 return new Selection { Error = "输入控件暂未响应，无法确认选区。" };
             return await work;
         }
@@ -179,20 +184,28 @@ namespace PairTap
                     return new Selection { Error = "选区已变化，请重新选中文字。" };
                 var verified = new Selection
                 {
-                    Element = element, Provider = provider, Range = range, Text = selected, VerifiedWritable = verifiedWritable
+                    Element = element, Provider = provider, Range = range, Pattern = textPattern,
+                    Text = selected, VerifiedWritable = verifiedWritable
                 };
                 if (previous == null && verifiedWritable)
                 {
                     int[] id = element.GetRuntimeId();
                     if (id != null && id.Length > 0) verified.EditorIdentity = "uia:" + string.Join(".", id);
                 }
-                if (writableValue && (previous == null || previous.OriginalValue != null))
+                if ((writableValue || verifiedWritable && provider.Equals(element)) &&
+                    (previous == null || previous.OriginalValue != null))
                 {
-                    string field = valuePattern.Current.Value;
+                    verified.Value = writableValue ? valuePattern : null;
+                    string field = ReadFieldValue(verified);
                     if (field != null && field.Length <= 64 * 1024)
                     {
-                        verified.Value = valuePattern;
                         verified.OriginalValue = field;
+                        if (previous == null) FindFieldRange(textPattern, verified);
+                        else
+                        {
+                            verified.StartOffset = previous.StartOffset;
+                            verified.EndOffset = previous.EndOffset;
+                        }
                     }
                 }
                 if (previous != null && previous.OriginalValue != null && !SameText(previous.OriginalValue, verified.OriginalValue))
@@ -205,7 +218,7 @@ namespace PairTap
             return result;
         }
 
-        private static Selection CheckAccessibleSelection(Target target, Selection previous)
+        private static Selection CheckAccessibleSelection(Target target, Selection previous, bool direct)
         {
             AccessibleSelection selected = AccessibleSelection.Read(target);
             if (previous != null && (selected == null || !selected.SameRange(previous.Accessible) ||
@@ -215,13 +228,27 @@ namespace PairTap
             string value = previous == null || previous.OriginalValue != null ? selected.ReadValue() : null;
             if (previous != null && previous.OriginalValue != null && !SameText(previous.OriginalValue, value))
                 return new Selection { Error = "输入框内容已变化，请重新选中文字。" };
-            return new Selection
+            var verified = new Selection
             {
                 Text = selected.Text,
                 Accessible = selected,
+                AccessibleText = direct ? selected.ObserveDirectText() : null,
                 VerifiedWritable = true,
-                OriginalValue = value != null && value.Length <= 64 * 1024 ? value : null
+                OriginalValue = value != null && value.Length <= 64 * 1024 ? value : null,
+                EditorIdentity = selected.EditorIdentity
             };
+            int start, end;
+            if (previous != null)
+            {
+                verified.StartOffset = previous.StartOffset;
+                verified.EndOffset = previous.EndOffset;
+            }
+            else if (selected.TryGetFlatOffsets(verified.OriginalValue, out start, out end))
+            {
+                verified.StartOffset = start;
+                verified.EndOffset = end;
+            }
+            return verified;
         }
 
         private static bool SelectionBelongsToFocus(TextPatternRange range, AutomationElement focused)
@@ -252,15 +279,17 @@ namespace PairTap
         private static async Task<string> WithClipboard(Target target, Pair pair, ClipboardChannel channel,
             ulong? positions, Selection verified)
         {
-            using (var backup = new ClipboardBuffer(channel.Handle))
+            target.Backend = "clipboard";
+            target.Stage = "capture";
+            ClipboardBuffer backup = null;
+            string captureError = null;
+            try { backup = await ClipboardBuffer.CaptureForWrap(channel.Handle); }
+            catch (InvalidOperationException captureFailure) { captureError = captureFailure.Message; }
+            catch (Win32Exception) { captureError = "当前剪贴板无法安全保留。"; }
+            if (backup == null)
+                return CanType(verified) ? await TypeSelection(target, pair, verified) : captureError;
+            using (backup)
             {
-                string captureError = null;
-                try { await backup.Capture(); }
-                catch (InvalidOperationException captureFailure) { captureError = captureFailure.Message; }
-                catch (Win32Exception) { captureError = "当前剪贴板无法安全保留。"; }
-                if (captureError != null)
-                    return CanType(verified) ? await TypeSelection(target, pair, verified) : captureError;
-
                 var transfer = new Transfer();
                 string result = null;
                 ExceptionDispatchInfo error = null;
@@ -273,21 +302,31 @@ namespace PairTap
                     {
                         RestoreResult restored = await Task.Run(() => backup.RestoreIfCurrent(transfer.Stamp.Value, transfer.OwnsPaste));
                         if (restored == RestoreResult.Failed)
+                        {
+                            target.Stage = "restore";
                             return "无法完整恢复原剪贴板。";
-                        if (restored != RestoreResult.Restored) transfer.MayType = transfer.PasteUnconfirmed = false;
+                        }
+                        if (restored == RestoreResult.Changed)
+                        {
+                            target.Stage = "restore-clipboard-changed";
+                            transfer.MayType = transfer.PasteUnconfirmed = false;
+                        }
                     }
                     if (error != null) error.Throw();
                 }
                 finally { channel.EndPaste(); }
                 if (transfer.MayType && CanType(verified))
                     return await TypeSelection(target, pair, verified);
-                if (transfer.PasteUnconfirmed && CanType(verified) && target.IsCurrent &&
-                    verified.EditorIdentity != null && (await Probe(target, verified)).Error == null)
+                if (transfer.PasteUnconfirmed && CanType(verified) && target.IsCurrent && verified.EditorIdentity != null)
                 {
-                    // A paste already went to this editor. Switch methods on the next explicit shortcut.
-                    clipboardRejected = target;
-                    clipboardRejectedEditor = verified.EditorIdentity;
-                    return "粘贴后选区仍在，请再按一次原快捷键以直接输入。";
+                    Selection unchanged = await Probe(target, verified, direct: true);
+                    if (unchanged.Error == null && HasDirectText(unchanged))
+                    {
+                        // A paste already went to this editor. Switch methods on the next explicit shortcut.
+                        clipboardRejected = target;
+                        clipboardRejectedEditor = verified.EditorIdentity;
+                        return "粘贴后选区仍在，请再按一次原快捷键以直接输入。";
+                    }
                 }
                 return result;
             }
@@ -296,6 +335,7 @@ namespace PairTap
         private static async Task<string> CopyAndPaste(Target target, Pair pair, ClipboardChannel channel,
             ClipboardBuffer backup, Transfer transfer, ulong? positions, Selection verified)
         {
+            target.Stage = "copy";
             Task<ClipboardStamp?> changed = channel.WatchCopy(backup.Original);
             ClipboardStamp? change;
             try
@@ -315,36 +355,45 @@ namespace PairTap
             bool ownerless = copied.Owner == IntPtr.Zero;
             if (ownerless ? verified == null || !verified.VerifiedWritable : Native.ProcessId(copied.Owner) != target.ProcessId)
                 return "剪贴板已由其他应用更新，请重试。";
-            if (!ownerless) transfer.Stamp = copied;
 
-            ClipboardStamp read = copied;
             bool canRetryCopy = verified != null && !ownerless;
-            string selected = await Task.Run(() => ClipboardBuffer.ReadSelection(copied, canRetryCopy, out read));
-            // Some clipboard providers announce a change before their final text format is available.
-            for (int retry = 0; selected == null && canRetryCopy && retry < 2 &&
-                target.IsCurrent && ClipboardBuffer.GetClipboardOwner() == copied.Owner; retry++)
+            Tuple<string, ClipboardStamp> copy;
+            try
             {
-                await Task.Delay(25);
-                selected = await Task.Run(() => ClipboardBuffer.ReadSelection(copied, true, out read));
+                copy = await ClipboardBuffer.ReadSelectionBounded(copied, canRetryCopy);
+                // Some providers announce a change before their final text format is available.
+                for (int retry = 0; copy.Item1 == null && canRetryCopy && retry < 2 &&
+                    target.IsCurrent && ClipboardBuffer.GetClipboardOwner() == copied.Owner; retry++)
+                {
+                    await Task.Delay(25);
+                    copy = await ClipboardBuffer.ReadSelectionBounded(copied, true);
+                }
             }
-            if (!ownerless && !canRetryCopy && read.Owner == copied.Owner) transfer.Stamp = read;
+            catch (InvalidOperationException error) { return error.Message + " 请检查当前剪贴板。"; }
+            string selected = copy.Item1;
+            ClipboardStamp read = copy.Item2;
             if (string.IsNullOrEmpty(selected))
             {
-                transfer.MayType = !ownerless && transfer.Stamp.Value.IsCurrent;
-                return "当前选区没有可包裹的纯文本，或复制内容超过上限。";
+                transfer.MayType = backup.Original.IsCurrent;
+                return "当前选区没有可包裹的纯文本，或复制内容超过上限。请检查当前剪贴板。";
             }
-            if (verified != null && !SameCopiedText(selected, verified.Text, ownerless))
-                return "复制内容与选区不一致，请重试。";
-            // An ownerless or later clipboard update is accepted only after its contents match the selection.
+            if (verified != null)
+            {
+                bool richParagraphs = !ownerless && (verified.Accessible == null ?
+                    verified.Value == null : verified.Accessible.HasNestedText);
+                if (!SameCopiedText(selected, verified.Text, richParagraphs))
+                    return "复制内容与选区不一致，已保留当前剪贴板，请重试。";
+            }
+            // The same process can perform an unrelated copy while the shortcut is running.
+            // Do not claim the clipboard update until its text matches the selection when available.
             transfer.Stamp = read;
 
             if (!target.IsCurrent || Native.ModifiersDown)
                 return "输入焦点或选区已变化，请重试。";
+            target.Stage = "prepare-paste";
             string replacement = pair.Left + selected + pair.Right;
             Task<bool> received = ClipboardBuffer.PreparePaste(target, replacement, channel);
-            bool staged;
-            try { staged = await Task.Run(() => backup.StagePaste(read, target)); }
-            finally { transfer.OwnsPaste = ClipboardBuffer.GetClipboardOwner() == channel.Handle; }
+            bool staged = await Task.Run(() => backup.StagePaste(read, target, out transfer.OwnsPaste));
             if (!staged) transfer.MayType = transfer.OwnsPaste || read.IsCurrent;
             if (!staged || !target.IsCurrent || Native.ModifiersDown || ClipboardBuffer.GetClipboardOwner() != channel.Handle)
                 return "无法安全替换当前选区，请重试。";
@@ -359,6 +408,7 @@ namespace PairTap
             if (!target.IsCurrent || Native.ModifiersDown || ClipboardBuffer.GetClipboardOwner() != channel.Handle)
                 return "输入焦点或剪贴板已变化，请重试。";
             channel.Dispatching();
+            target.Stage = "paste";
             if (!Native.ControlKey(Keys.V)) return "无法向当前窗口发送粘贴。";
 
             Task deadline = Task.Delay(550);
@@ -369,9 +419,11 @@ namespace PairTap
             }
 
             string expected = ExpectedValue(verified, replacement);
-            if (expected != null && Interlocked.CompareExchange(ref probing, 1, 0) == 0)
+            if (expected != null)
             {
-                Task<bool> confirmed = VerifyPaste(target, verified, expected, deadline);
+                target.Stage = "verify";
+                Task<bool> confirmed = VerifyFieldValue(target, verified, expected, deadline,
+                    verified.Value == null && verified.Accessible == null);
                 if (await Task.WhenAny(confirmed, Task.Delay(650)) != confirmed || !await confirmed)
                 {
                     transfer.PasteUnconfirmed = true;
@@ -384,97 +436,282 @@ namespace PairTap
 
         private static bool CanType(Selection selection)
         {
-            if (selection == null || !selection.VerifiedWritable || selection.Range == null ||
-                selection.OriginalValue == null || string.IsNullOrEmpty(selection.Text)) return false;
+            if (selection == null || !selection.VerifiedWritable || string.IsNullOrEmpty(selection.Text)) return false;
+            if (selection.Accessible != null) return true;
+            if (selection.OriginalValue == null || !selection.StartOffset.HasValue || !selection.EndOffset.HasValue)
+                return false;
             foreach (char character in selection.Text)
-                if (char.IsControl(character) || character == '\uFFFC' || character == '\u2028' ||
-                    character == '\u2029') return false;
+                if (character == '\uFFFC') return false;
             return true;
+        }
+
+        private static bool HasDirectText(Selection selection)
+        {
+            return CanType(selection) && (selection.Accessible == null || selection.AccessibleText != null);
         }
 
         private static async Task<string> TypeSelection(Target target, Pair pair, Selection selection)
         {
-            Selection current = await Probe(target, selection);
+            target.Backend = selection.Accessible == null ? "uia-keys" : "ia2-keys";
+            target.Stage = "probe";
+            Selection current = await Probe(target, selection, direct: true);
             if (current.Error != null) return current.Error;
-            if (!CanType(current)) return "当前无法确认选区可直接输入。";
-            string original = current.OriginalValue;
-            int end = await MoveToBoundary(target, current, TextPatternRangeEndpoint.End, original, -1);
-            int start = end - current.Text.Length;
-            if (start < 0 || !Native.TypeUnicode(target, pair.Right))
+            if (!HasDirectText(current)) return "当前无法确认选区可直接输入。";
+            string original = current.AccessibleText ?? current.OriginalValue;
+            int start = current.Accessible == null ? current.StartOffset.Value : current.Accessible.DirectStart;
+            int end = current.Accessible == null ? current.EndOffset.Value : current.Accessible.DirectEnd;
+            target.Stage = "right";
+            if (!await InsertAtBoundary(target, current, TextPatternRangeEndpoint.End, original, end, pair.Right, true))
                 return "无法在选区末尾插入标点，请检查原输入框。";
             string withRight = original.Insert(end, pair.Right);
             if (!await ConfirmValue(target, current, withRight))
-                return "未能确认右侧标点已插入，请检查原输入框。";
-            if (await MoveToBoundary(target, current, TextPatternRangeEndpoint.Start, withRight, start) != start ||
-                !Native.TypeUnicode(target, pair.Left) ||
+            {
+                target.Stage = "rollback";
+                if (await RestoreDetachedPlainInput(target, current, withRight, original))
+                    return "输入焦点已变化，已撤回原输入框中的右侧标点。";
+                return "未能确认右侧标点的写入结果，请检查原输入框。";
+            }
+            target.Stage = "left";
+            if (!await InsertAtBoundary(target, current, TextPatternRangeEndpoint.Start, withRight, start, pair.Left, false) ||
                 !await ConfirmValue(target, current, withRight.Insert(start, pair.Left)))
-                return "右侧标点已插入，左侧标点未能确认。请检查原输入框。";
-            Diagnostics.Write("wrap_backend unicode");
+            {
+                target.Stage = "rollback";
+                if (await RemoveInsertedSuffix(target, current, withRight, end, pair.Right) &&
+                    await ConfirmValue(target, current, original))
+                    return "无法完成两侧标点，已撤回右侧标点。";
+                if (await RestoreDetachedPlainInput(target, current, withRight, original))
+                    return "输入焦点已变化，已撤回原输入框中的右侧标点。";
+                return "未能完成或撤回本次操作，请检查原输入框是否只写入了右侧标点。";
+            }
             return null;
         }
 
-        private static async Task<int> MoveToBoundary(Target target, Selection selection,
-            TextPatternRangeEndpoint boundary, string expected, int knownOffset)
+        private static async Task<bool> InsertAtBoundary(Target target, Selection selection,
+            TextPatternRangeEndpoint boundary, string expected, int offset, string delimiter, bool requireSelection)
         {
-            if (Interlocked.CompareExchange(ref probing, 1, 0) != 0) return -1;
             Task deadline = Task.Delay(600);
-            Task<int> move = Task.Run(async () =>
+            Task<bool> move = providers.TryStart(target.Window, target.ProcessId, async () =>
             {
                 try
                 {
-                    if (!target.IsCurrent || Native.ModifiersDown ||
-                        !selection.Element.Equals(AutomationElement.FocusedElement) || selection.Value.Current.IsReadOnly ||
-                        !string.Equals(selection.Value.Current.Value, expected, StringComparison.Ordinal)) return -1;
+                    if (requireSelection && Native.ClassName(target.Window) == "Chrome_WidgetWin_1")
+                        BindPlainHtmlInput(target, selection, expected);
+                    if (selection.Accessible != null)
+                        return await selection.Accessible.SelectAndApply(target, expected, offset, offset,
+                            requireSelection, deadline, () => Native.TypeUnicode(target, delimiter)).ConfigureAwait(false);
+                    if (!SameWritableField(target, selection, expected)) return false;
                     var pattern = (TextPattern)selection.Provider.GetCurrentPattern(TextPattern.Pattern);
-                    if (knownOffset < 0)
+                    if (requireSelection)
                     {
                         TextPatternRange[] original = pattern.GetSelection();
-                        if (original.Length != 1 || !original[0].Compare(selection.Range)) return -1;
+                        if (original.Length != 1 || !original[0].Compare(selection.Range)) return false;
                     }
-                    var caret = selection.Range.Clone();
-                    caret.MoveEndpointByRange(boundary == TextPatternRangeEndpoint.Start ?
-                        TextPatternRangeEndpoint.End : TextPatternRangeEndpoint.Start, caret, boundary);
+                    TextPatternRange caret;
+                    if (requireSelection)
+                    {
+                        caret = selection.Range.Clone();
+                        caret.MoveEndpointByRange(boundary == TextPatternRangeEndpoint.Start ?
+                            TextPatternRangeEndpoint.End : TextPatternRangeEndpoint.Start, caret, boundary);
+                    }
+                    else
+                    {
+                        // Editing the right boundary can move or invalidate the provider's original range.
+                        caret = RangeToOffset(pattern, expected, offset, deadline);
+                        if (caret == null) return false;
+                        caret.MoveEndpointByRange(TextPatternRangeEndpoint.Start, caret, TextPatternRangeEndpoint.End);
+                    }
                     var prefix = pattern.DocumentRange;
                     prefix.MoveEndpointByRange(TextPatternRangeEndpoint.End, caret, TextPatternRangeEndpoint.Start);
-                    string before = prefix.GetText(expected.Length + 1);
-                    int offset = before.Length;
-                    if (!expected.StartsWith(before, StringComparison.Ordinal) ||
-                        (knownOffset >= 0 ? offset != knownOffset : offset < selection.Text.Length ||
-                        string.CompareOrdinal(expected, offset - selection.Text.Length,
-                            selection.Text, 0, selection.Text.Length) != 0)) return -1;
-                    if (deadline.IsCompleted || !target.IsCurrent || Native.ModifiersDown) return -1;
+                    if (PrefixLength(expected, prefix.GetText(expected.Length * 2 + 1)) != offset ||
+                        deadline.IsCompleted || !target.IsCurrent || Native.ModifiersDown) return false;
                     caret.Select();
                     while (!deadline.IsCompleted && target.IsCurrent && !Native.ModifiersDown)
                     {
                         TextPatternRange[] selected = pattern.GetSelection();
                         if (selected.Length == 1 && selected[0].Compare(caret) &&
-                            selection.Element.Equals(AutomationElement.FocusedElement) &&
-                            string.Equals(selection.Value.Current.Value, expected, StringComparison.Ordinal)) return offset;
+                            SameWritableField(target, selection, expected) &&
+                            BoundaryIsWritable(caret, selection) &&
+                            !deadline.IsCompleted && target.IsCurrent && !Native.ModifiersDown)
+                            return Native.TypeUnicode(target, delimiter);
                         await Task.Delay(15).ConfigureAwait(false);
                     }
                 }
                 catch (System.Runtime.InteropServices.COMException) { }
                 catch (InvalidOperationException) { }
-                finally { Interlocked.Exchange(ref probing, 0); }
-                return -1;
+                return false;
             });
-            return await Task.WhenAny(move, deadline) == move ? await move : -1;
+            return move != null && await Task.WhenAny(move, deadline) == move && await move;
+        }
+
+        private static void BindPlainHtmlInput(Target target, Selection selection, string expected)
+        {
+            if (selection.Accessible == null && (selection.Value == null ||
+                selection.Element.Current.FrameworkId != "Chrome")) return;
+            try
+            {
+                AccessibleSelection proof = selection.Accessible ?? AccessibleSelection.Read(target);
+                int start, end;
+                if (proof != null && proof.TryGetFlatOffsets(expected, out start, out end) &&
+                    (selection.Accessible != null || start == selection.StartOffset && end == selection.EndOffset) &&
+                    proof.IsPlainHtmlInput(expected, true)) selection.PlainHtmlInput = proof;
+            }
+            catch (System.Runtime.InteropServices.COMException) { }
+        }
+
+        private static async Task<bool> RestoreDetachedPlainInput(Target target, Selection selection, string expected, string original)
+        {
+            if (selection.PlainHtmlInput == null || !target.IsAlive) return false;
+            Task deadline = Task.Delay(650);
+            Task<bool> restore = providers.TryStart(target.Window, target.ProcessId, async () =>
+            {
+                try
+                {
+                    if (target.IsCurrent && selection.Element != null &&
+                        selection.Element.Equals(AutomationElement.FocusedElement)) return false;
+                    if (!selection.PlainHtmlInput.RestorePlainHtmlInput(target, expected, original, deadline)) return false;
+                    while (!deadline.IsCompleted && target.IsAlive)
+                    {
+                        if (string.Equals(selection.PlainHtmlInput.ReadValue(), original, StringComparison.Ordinal)) return true;
+                        await Task.Delay(15).ConfigureAwait(false);
+                    }
+                }
+                catch (System.Runtime.InteropServices.COMException) { }
+                catch (InvalidOperationException) { }
+                return false;
+            });
+            return restore != null && await Task.WhenAny(restore, deadline) == restore && await restore;
+        }
+
+        private static async Task<bool> RemoveInsertedSuffix(Target target, Selection selection, string expected,
+            int offset, string suffix)
+        {
+            Task deadline = Task.Delay(600);
+            Task<bool> remove = providers.TryStart(target.Window, target.ProcessId, async () =>
+            {
+                try
+                {
+                    if (selection.Accessible != null)
+                        return await selection.Accessible.SelectAndApply(target, expected, offset, offset + suffix.Length,
+                            false, deadline, () => Native.DeleteSelection(target)).ConfigureAwait(false);
+                    if (!SameWritableField(target, selection, expected)) return false;
+                    var pattern = (TextPattern)selection.Provider.GetCurrentPattern(TextPattern.Pattern);
+                    TextPatternRange first = RangeToOffset(pattern, expected, offset, deadline);
+                    TextPatternRange last = RangeToOffset(pattern, expected, offset + suffix.Length, deadline);
+                    if (first == null || last == null) return false;
+                    first.MoveEndpointByRange(TextPatternRangeEndpoint.Start, first, TextPatternRangeEndpoint.End);
+                    first.MoveEndpointByRange(TextPatternRangeEndpoint.End, last, TextPatternRangeEndpoint.End);
+                    if (first.GetText(suffix.Length + 1) != suffix || !SameWritableField(target, selection, expected) ||
+                        !BoundaryIsWritable(first, selection) ||
+                        deadline.IsCompleted) return false;
+                    first.Select();
+                    while (!deadline.IsCompleted && target.IsCurrent && !Native.ModifiersDown)
+                    {
+                        TextPatternRange[] selected = pattern.GetSelection();
+                        if (selected.Length == 1 && selected[0].Compare(first) &&
+                            SameWritableField(target, selection, expected) && !deadline.IsCompleted)
+                            return Native.DeleteSelection(target);
+                        await Task.Delay(15).ConfigureAwait(false);
+                    }
+                }
+                catch (System.Runtime.InteropServices.COMException) { }
+                catch (InvalidOperationException) { }
+                return false;
+            });
+            return remove != null && await Task.WhenAny(remove, deadline) == remove && await remove;
+        }
+
+        private static bool SameWritableField(Target target, Selection selection, string expected)
+        {
+            return target.IsCurrent && !Native.ModifiersDown &&
+                selection.Element.Equals(AutomationElement.FocusedElement) &&
+                (selection.Value == null || !selection.Value.Current.IsReadOnly) &&
+                string.Equals(ReadFieldValue(selection), expected, StringComparison.Ordinal);
+        }
+
+        private static bool BoundaryIsWritable(TextPatternRange range, Selection selection)
+        {
+            object readOnly = range.GetAttributeValue(TextPattern.IsReadOnlyAttribute);
+            return Equals(readOnly, false) || selection.Value != null &&
+                !Equals(readOnly, true) && readOnly != TextPattern.MixedAttributeValue;
+        }
+
+        private static string ReadFieldValue(Selection selection)
+        {
+            if (selection.Accessible != null) return selection.Accessible.ReadValue();
+            if (selection.Value != null) return selection.Value.Current.Value;
+            return selection.Pattern.DocumentRange.GetText(64 * 1024 + 1);
+        }
+        private static TextPatternRange RangeToOffset(TextPattern pattern, string value, int offset, Task deadline)
+        {
+            // UIA character units can group several UTF-16 units into one user-visible character.
+            for (int low = 0, high = offset, count = offset; low <= high && !deadline.IsCompleted;)
+            {
+                TextPatternRange prefix = pattern.DocumentRange;
+                prefix.MoveEndpointByRange(TextPatternRangeEndpoint.End, prefix, TextPatternRangeEndpoint.Start);
+                prefix.MoveEndpointByUnit(TextPatternRangeEndpoint.End, TextUnit.Character, count);
+                int length = PrefixLength(value, prefix.GetText(value.Length * 2 + 1));
+                if (length < 0) return null;
+                if (length == offset) return prefix;
+                if (length > offset) high = count - 1;
+                else low = count + 1;
+                count = low + (high - low) / 2;
+            }
+            return null;
+        }
+
+        private static void FindFieldRange(TextPattern pattern, Selection selection)
+        {
+            try
+            {
+                var prefix = pattern.DocumentRange;
+                string field = selection.OriginalValue;
+                prefix.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection.Range, TextPatternRangeEndpoint.Start);
+                int start = PrefixLength(field, prefix.GetText(field.Length * 2 + 1));
+                prefix.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection.Range, TextPatternRangeEndpoint.End);
+                int end = PrefixLength(field, prefix.GetText(field.Length * 2 + 1));
+                if (start >= 0 && end > start && SameText(field.Substring(start, end - start), selection.Text))
+                {
+                    selection.StartOffset = start;
+                    selection.EndOffset = end;
+                }
+            }
+            catch (System.Runtime.InteropServices.COMException) { }
+            catch (InvalidOperationException) { }
+        }
+
+        private static int PrefixLength(string value, string prefix)
+        {
+            if (value.StartsWith(prefix, StringComparison.Ordinal) &&
+                (prefix.Length == 0 || prefix.Length == value.Length ||
+                prefix[prefix.Length - 1] != '\r' || value[prefix.Length] != '\n')) return prefix.Length;
+            int offset = 0;
+            for (int i = 0; i < prefix.Length; i++)
+            {
+                if (offset == value.Length) return -1;
+                char actual = value[offset++], supplied = prefix[i];
+                if ((actual == '\n' || actual == '\r') && (supplied == '\n' || supplied == '\r'))
+                {
+                    if (actual == '\r' && offset < value.Length && value[offset] == '\n') offset++;
+                    if (supplied == '\r' && i + 1 < prefix.Length && prefix[i + 1] == '\n') i++;
+                }
+                else if (actual != supplied) return -1;
+            }
+            return offset;
         }
 
         private static async Task<bool> ConfirmValue(Target target, Selection selection, string expected)
         {
-            if (Interlocked.CompareExchange(ref probing, 1, 0) != 0) return false;
             Task deadline = Task.Delay(550);
-            Task<bool> confirmed = VerifyPaste(target, selection, expected, deadline);
-            return await Task.WhenAny(confirmed, deadline) == confirmed && await confirmed;
+            Task<bool> confirmed = VerifyFieldValue(target, selection, expected, deadline, direct: true);
+            return await Task.WhenAny(confirmed, Task.Delay(650)) == confirmed && await confirmed;
         }
 
-        private static bool SameCopiedText(string copied, string verified, bool ownerless)
+        private static bool SameCopiedText(string copied, string verified, bool richParagraphs)
         {
             if (SameText(copied, verified)) return true;
             // HTML paragraph boundaries can be one break in the provider and two on the clipboard.
-            // Only permit this difference for a copy attributed to the target process.
-            return !ownerless && string.Equals(Regex.Replace(copied, "[\r\n]+", "\n"),
+            // Plain editors must preserve the number of line breaks.
+            return richParagraphs && string.Equals(Regex.Replace(copied, "[\r\n]+", "\n"),
                 Regex.Replace(verified, "[\r\n]+", "\n"), StringComparison.Ordinal);
         }
 
@@ -482,30 +719,35 @@ namespace PairTap
         {
             if (selection == null || selection.OriginalValue == null) return null;
             string value = selection.OriginalValue;
+            if (selection.StartOffset.HasValue && selection.EndOffset.HasValue)
+                return value.Remove(selection.StartOffset.Value, selection.EndOffset.Value - selection.StartOffset.Value)
+                    .Insert(selection.StartOffset.Value, replacement);
             int start = value.IndexOf(selection.Text, StringComparison.Ordinal);
             if (start < 0 || value.IndexOf(selection.Text, start + 1, StringComparison.Ordinal) >= 0) return null;
             return value.Substring(0, start) + replacement + value.Substring(start + selection.Text.Length);
         }
 
-        private static async Task<bool> VerifyPaste(Target target, Selection selection, string expected, Task deadline)
+        private static Task<bool> VerifyFieldValue(Target target, Selection selection, string expected, Task deadline,
+            bool allowParagraphBreakDifferences = false, bool direct = false)
         {
-            try
+            return providers.TryStart(target.Window, target.ProcessId, async () =>
             {
-                return await Task.Run(async () =>
+                try
                 {
                     while (!deadline.IsCompleted && target.IsCurrent)
                     {
-                        string value = selection.Accessible == null ? selection.Value.Current.Value : selection.Accessible.ReadValue();
-                        if (SameText(value, expected)) return true;
+                        string value = direct && selection.Accessible != null ?
+                            selection.Accessible.ReadDirectText() : ReadFieldValue(selection);
+                        if (direct ? string.Equals(value, expected, StringComparison.Ordinal) :
+                            SameText(value, expected) || (allowParagraphBreakDifferences && value != null &&
+                            SameCopiedText(value, expected, true))) return true;
                         await Task.Delay(30).ConfigureAwait(false);
                     }
-                    return false;
-                });
-            }
-            catch (System.Runtime.InteropServices.COMException) { }
-            catch (InvalidOperationException) { }
-            finally { Interlocked.Exchange(ref probing, 0); }
-            return false;
+                }
+                catch (System.Runtime.InteropServices.COMException) { }
+                catch (InvalidOperationException) { }
+                return false;
+            }) ?? Task.FromResult(false);
         }
     }
 }

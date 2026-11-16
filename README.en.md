@@ -35,4 +35,8 @@ Add `Ctrl` to your normal punctuation keystroke to wrap the selected text:
 > - Press `Ctrl+Alt+F6` to choose from all 23 matching pairs.
 > - Click the tray icon to view the punctuation panel. Right-click and choose Shortcut Settings to customize shortcuts or lock output to Chinese marks.
 > - In Word documents and tables, PairTap inserts delimiters around the selection, preserving its formatting. A single undo removes both delimiters.
-> - The runtime log at `%LOCALAPPDATA%\PairTap\Logs\runtime.log` records operation status, timing, and error codes.
+> - If the clipboard is busy or an editor blocks copying, the same shortcut inserts delimiters directly when it can verify both ends of the selection. If a paste was sent without changing a verifiable selection, the notification asks you to press the same shortcut again.
+> - Clipboard-free wrapping needs an editor that exposes readable text and precise selection boundaries. PairTap stops writing when it detects a focus or content change. Check the original editor if a notification reports an unconfirmed result.
+> - The runtime log at `%LOCALAPPDATA%\PairTap\Logs\runtime.log` records the application process name, write method, stage, timing, and result. It omits document names, selected text, and clipboard content.
+
+To build and run release checks, exit PairTap and Word, then run `pwsh -File VerifyRelease.ps1` from an interactive Windows session with Chrome, Word, and PowerShell 7 installed. Use `-Quick` to check the build, version, checksum, and recovery from stalled editors and clipboard reads. Use `-SettingsOnly` to test shortcut conflicts, saving, and persistence across a restart. This mode restores the original shortcut settings when it finishes. Use `-RequireMixedDpi` when two active displays use different DPI settings, or `-Artifact` with `-RequireSignature` to check a signed release binary.

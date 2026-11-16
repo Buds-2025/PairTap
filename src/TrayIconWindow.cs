@@ -18,6 +18,7 @@ namespace PairTap
         private const uint Select = 0x0400, KeySelect = 0x0401;
         private const uint MenuDisabled = 0x0001, MenuSeparator = 0x0800;
         private const uint MenuRightButton = 0x0002, MenuBottomAlign = 0x0020, MenuReturnCommand = 0x0100;
+        private const uint MenuPreferVertical = 0x0040;
         private readonly uint taskbarCreated = RegisterWindowMessage("TaskbarCreated");
         private readonly Action<TrayCommand> command;
         private readonly Icon icon;
@@ -52,6 +53,8 @@ namespace PairTap
 
         [StructLayout(LayoutKind.Sequential)]
         private struct Bounds { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MenuPlacement { public uint Size; public Bounds Exclude; }
 
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern bool Shell_NotifyIcon(uint operation, ref IconData data);
         [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref IconIdentifier identifier, out Bounds bounds);
@@ -60,6 +63,9 @@ namespace PairTap
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool AppendMenu(IntPtr menu, uint flags, UIntPtr id, string text);
         [DllImport("user32.dll")] private static extern bool DestroyMenu(IntPtr menu);
         [DllImport("user32.dll")] private static extern uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr window, IntPtr parameters);
+        [DllImport("user32.dll")] private static extern uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr window, ref MenuPlacement placement);
+        [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Bounds bounds);
         [DllImport("user32.dll")] private static extern bool EndMenu();
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string caption);
         [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint processId);
@@ -142,6 +148,8 @@ namespace PairTap
         {
             IntPtr menu = CreatePopupMenu();
             if (menu == IntPtr.Zero) return;
+            // An earlier status balloon can cover the menu next to the tray icon.
+            Notify(string.Empty);
             uint selected = 0;
             MenuOpen = true;
             try
@@ -160,8 +168,13 @@ namespace PairTap
                     anchor = new Point(bounds.Left, bounds.Top);
 
                 bool foreground = Native.SetForegroundWindow(Handle);
-                selected = TrackPopupMenuEx(menu, MenuRightButton | MenuBottomAlign | MenuReturnCommand,
-                    anchor.X, anchor.Y, Handle, IntPtr.Zero);
+                const uint flags = MenuRightButton | MenuBottomAlign | MenuReturnCommand;
+                if (TryGetShellOverlay(anchor, out bounds))
+                {
+                    var placement = new MenuPlacement { Size = (uint)Marshal.SizeOf(typeof(MenuPlacement)), Exclude = bounds };
+                    selected = TrackPopupMenuEx(menu, flags | MenuPreferVertical, anchor.X, bounds.Top, Handle, ref placement);
+                }
+                else selected = TrackPopupMenuEx(menu, flags, anchor.X, anchor.Y, Handle, IntPtr.Zero);
                 if (!foreground && selected == 0) Diagnostics.Write("tray_menu closed_without_foreground");
             }
             finally
@@ -178,6 +191,16 @@ namespace PairTap
                 Shell_NotifyIcon(ReturnFocus, ref data);
             }
             else PostCommand((TrayCommand)selected);
+        }
+
+        private static bool TryGetShellOverlay(Point anchor, out Bounds bounds)
+        {
+            IntPtr overlay = WindowFromPoint(new Point(anchor.X + 16, anchor.Y - 16));
+            bounds = new Bounds();
+            if (Native.ClassName(overlay) != "Windows.UI.Core.CoreWindow" || !GetWindowRect(overlay, out bounds)) return false;
+            Rectangle area = Screen.FromPoint(anchor).WorkingArea;
+            return bounds.Top > area.Top && bounds.Top < anchor.Y && bounds.Bottom > anchor.Y - 16 &&
+                bounds.Bottom - bounds.Top < area.Height / 2;
         }
 
         private void PostCommand(TrayCommand action)

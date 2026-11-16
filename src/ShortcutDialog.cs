@@ -94,7 +94,7 @@ namespace PairTap
             clear.Click += (sender, args) => SetShortcut(Keys.None);
             editor.Controls.Add(clear, 2, 0);
             layout.Controls.Add(editor, 0, 3);
-            status = new Label { AutoSize = true, Dock = DockStyle.Fill, AccessibleName = "快捷键设置状态" };
+            status = new Label { AutoSize = true, Dock = DockStyle.Fill };
             layout.Controls.Add(status, 0, 4);
 
             var actions = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };

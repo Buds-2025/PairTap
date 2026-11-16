@@ -81,9 +81,9 @@ public static class TrayTest
         var info = new MenuInfo { Size = (uint)Marshal.SizeOf(typeof(MenuInfo)) };
         return GetMenuBarInfo(window, -4, 0, ref info) && GetMenuItemRect(IntPtr.Zero, info.Menu, index, out bounds);
     }
-    public static bool Hit(IntPtr window, int x, int y)
+    public static IntPtr Hit(int x, int y)
     {
-        return WindowFromPoint(new Point { X = x, Y = y }) == window;
+        return WindowFromPoint(new Point { X = x, Y = y });
     }
 }
 '@
@@ -117,9 +117,19 @@ $editor = New-Object Windows.Forms.TextBox
 $editor.Dock = 'Fill'
 $fixture.Controls.Add($editor)
 
+function Focus-TrayFixture {
+    return Wait-Condition {
+        if ([TestKeys]::GetForegroundWindow() -ne $fixture.Handle) {
+            $fixture.Activate()
+            [void][TestKeys]::FocusFixture($fixture.Handle)
+        }
+        [void]$editor.Focus()
+        [TestKeys]::GetForegroundWindow() -eq $fixture.Handle
+    } 1200
+}
+
 function Invoke-TrayMenuItem([uint32]$index) {
-    [TestKeys]::Focus($fixture.Handle)
-    Assert (Wait-Condition { [TestKeys]::GetForegroundWindow() -eq $fixture.Handle } 1200) 'tray foreground fixture is active'
+    Assert (Focus-TrayFixture) 'tray foreground fixture is active'
     [TestKeys]::Stroke(0x10)
     Pump 60
     Assert ([TrayTest]::AllowSetForegroundWindow($app.Id)) 'the fixture grants the simulated shell foreground permission'
@@ -127,12 +137,23 @@ function Invoke-TrayMenuItem([uint32]$index) {
     Assert (Wait-Condition { (Find-TrayWindow '#32768') -ne [IntPtr]::Zero } 1400) 'native menu is visible for command navigation'
     Assert ([TestKeys]::Owner([TestKeys]::GetForegroundWindow()) -eq $app.Id) 'tray menu owns foreground before navigation'
     $popup = Find-TrayWindow '#32768'
-    $item = [TrayTest+Rect]::new()
-    Assert ([TrayTest]::MenuItem($popup, $index, [ref]$item)) 'menu item has a native hit target'
-    $x = [int](($item.Left + $item.Right) / 2)
-    $y = [int](($item.Top + $item.Bottom) / 2)
-    Assert ([TrayTest]::Hit($popup, $x, $y)) 'menu click lands inside the popup'
-    [TestKeys]::Click($x, $y)
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $item = [TrayTest+Rect]::new()
+        if ([TrayTest]::MenuItem($popup, $index, [ref]$item)) {
+            $y = [int](($item.Top + $item.Bottom) / 2)
+            foreach ($part in 0.5, 0.15, 0.85) {
+                $x = [int]($item.Left + ($item.Right - $item.Left) * $part)
+                $hit = [TrayTest]::Hit($x, $y)
+                if ($hit -eq $popup) {
+                    [TestKeys]::Click($x, $y)
+                    return
+                }
+            }
+        }
+        Pump 35
+    } while ($watch.ElapsedMilliseconds -lt 6500 -and (Find-TrayWindow '#32768') -eq $popup)
+    throw "Menu item $index did not become clickable. Popup $popup, screen point ($x,$y), hit $hit."
 }
 
 try {
@@ -170,9 +191,7 @@ try {
     Assert ((Find-TrayWindow $settingsName) -eq $settings -and (Find-TrayWindow $panelName) -eq [IntPtr]::Zero) 'single click reuses open settings'
     Close-TrayWindow $settingsName
 
-    [TestKeys]::Focus($fixture.Handle)
-    [void]$editor.Focus()
-    Assert ([TestKeys]::GetForegroundWindow() -eq $fixture.Handle) 'fixture is active for the deferred request'
+    Assert (Focus-TrayFixture) 'fixture is active for the deferred request'
     [TestKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
     [TestKeys]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
     try {
@@ -188,12 +207,17 @@ try {
     }
     Assert (Wait-Condition { (Find-TrayWindow $panelName) -ne [IntPtr]::Zero } 1400) 'queued tray click opens after the busy operation'
     $passive = Find-TrayWindow $panelName
-    [TestKeys]::Focus($fixture.Handle)
-    [void]$editor.Focus()
-    Pump 100
-    Assert ([TestKeys]::GetForegroundWindow() -eq $fixture.Handle) 'fixture is active while the browse palette is open'
+    Pump 220
+    Assert (Focus-TrayFixture) 'fixture is active while the browse palette is open'
+    $editor.Text = '托盘选区'
+    $editor.SelectAll()
     [TestKeys]::Hotkey(0x75)
-    Assert (Wait-Condition { $active = Find-TrayWindow $panelName; $active -ne [IntPtr]::Zero -and $active -ne $passive } 1400) 'shortcut replaces the background browse palette with a selection palette'
+    Assert (Wait-Condition {
+        $active = Find-TrayWindow $panelName
+        $active -ne [IntPtr]::Zero -and $active -ne $passive -and [TestKeys]::GetForegroundWindow() -eq $active
+    } 2200) 'shortcut replaces the background browse palette with a selection palette'
+    [TestKeys]::Enter()
+    Assert (Wait-Condition { $editor.Text -ceq '“托盘选区”' } 1500) 'the replacement palette applies to the original fixture selection'
     Close-TrayWindow $panelName
 
     $duplicate = Start-Process -FilePath $env:PAIRTAP_TEST_EXE -WindowStyle Hidden -PassThru

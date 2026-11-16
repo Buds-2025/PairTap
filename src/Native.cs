@@ -10,6 +10,7 @@ namespace PairTap
         [DllImport("user32.dll")] internal static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint key);
         [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(IntPtr h, int id);
         [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
@@ -90,6 +91,8 @@ namespace PairTap
             GetWindowThreadProcessId(window, out pid);
             return pid;
         }
+
+        internal static IntPtr RootWindow(IntPtr window) { return GetAncestor(window, 2); }
 
         internal static IntPtr KeyboardLayout(IntPtr window)
         {
@@ -241,6 +244,13 @@ namespace PairTap
                 SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input))) == inputs.Length;
         }
 
+        internal static bool DeleteSelection(Target target)
+        {
+            Input[] inputs = { Key(Keys.Delete, false), Key(Keys.Delete, true) };
+            return target.IsCurrent && !ModifiersDown &&
+                SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input))) == inputs.Length;
+        }
+
         private static Input Key(Keys key, bool up)
         {
             return new Input { Type = 1, Data = new InputData { Keyboard = new Keyboard { Key = (ushort)key, Flags = up ? 2u : 0u } } };
@@ -249,20 +259,28 @@ namespace PairTap
 
     internal sealed class Target
     {
-        internal readonly IntPtr Window = Native.GetForegroundWindow();
+        internal readonly IntPtr Window;
         internal readonly IntPtr Focus;
         internal readonly uint ProcessId;
+        internal string Backend = "selection", Stage = "target";
 
-        internal Target()
+        internal Target() : this(Native.GetForegroundWindow()) { }
+
+        private Target(IntPtr window)
         {
+            Window = window;
             Focus = Native.Focus(Window);
             ProcessId = Native.ProcessId(Window);
         }
 
+        internal bool IsAlive
+        {
+            get { return Window != IntPtr.Zero && ProcessId != 0 && Native.ProcessId(Window) == ProcessId; }
+        }
+
         internal bool IsCurrent
         {
-            get { return Window != IntPtr.Zero && Focus != IntPtr.Zero && ProcessId != 0 &&
-                Native.GetForegroundWindow() == Window && Native.ProcessId(Window) == ProcessId && Native.Focus(Window) == Focus; }
+            get { return Focus != IntPtr.Zero && Native.GetForegroundWindow() == Window && IsAlive && Native.Focus(Window) == Focus; }
         }
 
         internal bool SameControl(Target other)

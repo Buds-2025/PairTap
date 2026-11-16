@@ -1,4 +1,4 @@
-param([string]$Snapshots)
+param([string]$Snapshots, [switch]$RequireMixedDpi)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
@@ -18,6 +18,7 @@ using PairTap;
 internal static class DpiLayout
 {
     [DllImport("user32.dll")] private static extern IntPtr GetWindowDpiAwarenessContext(IntPtr window);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
 
     private static void Check(bool ok, string message)
@@ -129,48 +130,87 @@ internal static class DpiLayout
         Size[] sizes = { new Size(640, 440), new Size(1024, 560), new Size(1366, 728),
             new Size(1920, 1040), new Size(900, 1550), new Size(3840, 2080) };
         using (var icon = new Icon(typeof(Palette).Assembly.GetManifestResourceStream("brand")))
-        foreach (Size size in sizes)
-        foreach (int dpi in dpis)
         {
-            var area = new Rectangle(0, 0, size.Width, size.Height);
-            Keys[] bindings = ShortcutSettings.Defaults();
-            bindings[2] = Keys.Control | Keys.Alt | Keys.Shift | Keys.OemBackslash;
-            bool snapshot = (size.Width == 1366 && dpi == 144) || (size.Width == 640 && dpi == 336) ||
-                (size.Width == 3840 && dpi == 288);
-            using (var palette = new Palette(bindings, PunctuationShape.Chinese, true, icon))
+            CheckMixedDpi(icon, args.Length > 1 && args[1] == "required");
+            foreach (Size size in sizes)
+            foreach (int dpi in dpis)
             {
-                palette.OpenOn(Screen.PrimaryScreen);
-                palette.Show();
-                Check(AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(palette.Handle), (IntPtr)(-4)),
-                    "PairTap manifest does not establish per-monitor DPI v2");
-                palette.ApplyDisplay(area, dpi, true);
-                Check(area.Contains(palette.Bounds), "Palette outside work area");
-                PaletteFits(palette);
-                if (snapshot) Save(palette, snapshots, "palette-" + size.Width + "-" + dpi);
-                palette.Size = palette.MinimumSize;
-                PaletteFits(palette);
-                palette.ApplyDisplay(area, dpi == 96 ? 192 : 96, false);
-                Check(area.Contains(palette.Bounds), "Palette outside work area after a DPI change");
-                PaletteFits(palette);
+                var area = new Rectangle(0, 0, size.Width, size.Height);
+                Keys[] bindings = ShortcutSettings.Defaults();
+                bindings[2] = Keys.Control | Keys.Alt | Keys.Shift | Keys.OemBackslash;
+                bool snapshot = (size.Width == 1366 && dpi == 144) || (size.Width == 640 && dpi == 336) ||
+                    (size.Width == 3840 && dpi == 288);
+                using (var palette = new Palette(bindings, PunctuationShape.Chinese, true, icon))
+                {
+                    palette.OpenOn(Screen.PrimaryScreen);
+                    palette.Show();
+                    Check(AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(palette.Handle), (IntPtr)(-4)),
+                        "PairTap manifest does not establish per-monitor DPI v2");
+                    palette.ApplyDisplay(area, dpi, true);
+                    Check(area.Contains(palette.Bounds), "Palette outside work area");
+                    PaletteFits(palette);
+                    if (snapshot) Save(palette, snapshots, "palette-" + size.Width + "-" + dpi);
+                    palette.Size = palette.MinimumSize;
+                    PaletteFits(palette);
+                    palette.ApplyDisplay(area, dpi == 96 ? 192 : 96, false);
+                    Check(area.Contains(palette.Bounds), "Palette outside work area after a DPI change");
+                    PaletteFits(palette);
+                }
+                using (var settings = new ShortcutDialog(bindings, PunctuationPreference.Auto, icon, (keys, style) => null))
+                {
+                    settings.OpenOn(Screen.PrimaryScreen);
+                    settings.Show();
+                    Field<Label>(settings, "status").Text = "无法注册 Ctrl+Alt+Shift+Backslash（半角直双引号）。请改用其他组合键。";
+                    settings.ApplyDisplay(area, dpi, true);
+                    Check(area.Contains(settings.Bounds), "Settings outside work area");
+                    SettingsFit(settings);
+                    if (snapshot) Save(settings, snapshots, "settings-" + size.Width + "-" + dpi);
+                    settings.Size = settings.MinimumSize;
+                    SettingsFit(settings);
+                    settings.ApplyDisplay(area, dpi == 96 ? 192 : 96, false);
+                    Check(area.Contains(settings.Bounds), "Settings outside work area after a DPI change");
+                    SettingsFit(settings);
+                }
+                Console.WriteLine("PASS work area {0}x{1}, {2}% DPI, resize and DPI change", size.Width, size.Height, dpi * 100 / 96);
             }
-            using (var settings = new ShortcutDialog(bindings, PunctuationPreference.Auto, icon, (keys, style) => null))
-            {
-                settings.OpenOn(Screen.PrimaryScreen);
-                settings.Show();
-                Field<Label>(settings, "status").Text = "无法注册 Ctrl+Alt+Shift+Backslash（半角直双引号）。请改用其他组合键。";
-                settings.ApplyDisplay(area, dpi, true);
-                Check(area.Contains(settings.Bounds), "Settings outside work area");
-                SettingsFit(settings);
-                if (snapshot) Save(settings, snapshots, "settings-" + size.Width + "-" + dpi);
-                settings.Size = settings.MinimumSize;
-                SettingsFit(settings);
-                settings.ApplyDisplay(area, dpi == 96 ? 192 : 96, false);
-                Check(area.Contains(settings.Bounds), "Settings outside work area after a DPI change");
-                SettingsFit(settings);
-            }
-            Console.WriteLine("PASS work area {0}x{1}, {2}% DPI, resize and DPI change", size.Width, size.Height, dpi * 100 / 96);
         }
         return 0;
+    }
+
+    private static void CheckMixedDpi(Icon icon, bool required)
+    {
+        Screen[] screens = Screen.AllScreens;
+        uint firstDpi = 0;
+        bool mixed = false;
+        Keys[] bindings = ShortcutSettings.Defaults();
+        using (var palette = new Palette(bindings, null, true, icon))
+        using (var settings = new ShortcutDialog(bindings, PunctuationPreference.Auto, icon, (keys, style) => null))
+        {
+            palette.OpenOn(screens[0]);
+            settings.OpenOn(screens[0]);
+            palette.Show();
+            settings.Show();
+            var measuredDpi = typeof(DpiForm).GetField("monitorDpi", BindingFlags.Instance | BindingFlags.NonPublic);
+            foreach (Screen screen in screens)
+            {
+                Rectangle area = screen.WorkingArea;
+                var destination = new Point(area.Left + 4, area.Top + 4);
+                palette.Location = destination;
+                settings.Location = destination;
+                Application.DoEvents();
+                uint dpi = GetDpiForWindow(palette.Handle);
+                Check(area.Contains(palette.Bounds) && area.Contains(settings.Bounds) &&
+                    (int)measuredDpi.GetValue(palette) == dpi && (int)measuredDpi.GetValue(settings) == GetDpiForWindow(settings.Handle),
+                    "A real monitor move left a window outside the work area or using stale DPI.");
+                PaletteFits(palette);
+                SettingsFit(settings);
+                mixed |= firstDpi != 0 && dpi != firstDpi;
+                if (firstDpi == 0) firstDpi = dpi;
+            }
+        }
+        Check(mixed || !required, "Mixed-DPI verification requires two active monitors with different DPI.");
+        Console.WriteLine(mixed ? "PASS actual Windows monitor moves at different DPI" :
+            "SKIP actual mixed-DPI move: no active monitors with different DPI");
     }
 }
 '@ | Set-Content -LiteralPath $fixture -Encoding utf8
@@ -181,7 +221,8 @@ try {
     $qr = Join-Path $root 'assets\bilibili-qr.png'
     & "$framework\csc.exe" /nologo /warnaserror /codepage:65001 /main:DpiLayout "/out:$exe" "/win32manifest:$manifest" "/resource:$icon,brand" "/resource:$qr,bilibili-qr" "/r:$framework\Accessibility.dll" "/r:$framework\WPF\UIAutomationClient.dll" "/r:$framework\WPF\UIAutomationTypes.dll" "/r:$framework\WPF\WindowsBase.dll" $source $fixture
     if ($LASTEXITCODE) { throw 'DPI fixture could not be compiled.' }
-    & $exe $Snapshots
+    $displayMode = if ($RequireMixedDpi) { 'required' } else { 'optional' }
+    & $exe ([string]$Snapshots) $displayMode
     if ($LASTEXITCODE) { throw 'DPI layout checks failed.' }
 }
 finally {

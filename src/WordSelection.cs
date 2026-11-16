@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,7 +11,8 @@ namespace PairTap
         private const uint NativeObjectModel = 0xFFFFFFF0;
         private const int InsertionPoint = 1, NormalSelection = 2, ColumnSelection = 4, RowSelection = 5, NoProtection = -1;
         private const int InFieldCode = 44;
-        private static int running;
+        private static readonly HashSet<uint> running = new HashSet<uint>();
+        private enum InterruptedEdit { Unconfirmed, Completed, Reverted }
 
         [DllImport("oleacc.dll")]
         private static extern int AccessibleObjectFromWindow(IntPtr window, uint objectId, ref Guid iid,
@@ -18,23 +20,24 @@ namespace PairTap
 
         internal static async Task<string> Apply(Target target, Pair pair)
         {
-            if (Interlocked.CompareExchange(ref running, 1, 0) != 0)
+            if (!TryEnter(target.ProcessId))
                 return "Word 正在处理上一次操作，请稍后重试。";
 
-            // A timed-out probe cannot begin editing if Word responds later.
-            // Once editing starts, wait for both insertions and the undo record to finish.
+            // Word may block in a COM call. Once the caller times out, the worker may only
+            // finish an in-flight call and clean up its own insertion in the original document.
             int state = 0;
             var result = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             var worker = new Thread(() =>
             {
                 string message;
-                try { message = Insert(target, pair, () => Interlocked.CompareExchange(ref state, 1, 0) == 0); }
+                try { message = Insert(target, pair, () => Interlocked.CompareExchange(ref state, 1, 0) == 0,
+                    () => Volatile.Read(ref state) == 1); }
                 catch (Exception error)
                 {
                     Diagnostics.Failure("word", error);
                     message = "Word 无法处理当前选区，请重新选中文字。";
                 }
-                finally { Interlocked.Exchange(ref running, 0); }
+                finally { Leave(target.ProcessId); }
                 result.TrySetResult(message);
             }) { IsBackground = true };
             try
@@ -44,17 +47,32 @@ namespace PairTap
             }
             catch
             {
-                Interlocked.Exchange(ref running, 0);
+                Leave(target.ProcessId);
                 throw;
             }
 
-            if (await Task.WhenAny(result.Task, Task.Delay(1500)) != result.Task &&
-                Interlocked.CompareExchange(ref state, 2, 0) == 0)
-                return "Word 暂未响应，请稍后重试。";
+            if (await Task.WhenAny(result.Task, Task.Delay(1500)) != result.Task)
+            {
+                int previous = Interlocked.Exchange(ref state, 2);
+                return previous == 0 ? "Word 暂未响应，请稍后重试。" :
+                    "Word 编辑响应超时，请先检查原文档。";
+            }
             return await result.Task;
         }
 
-        private static string Insert(Target target, Pair pair, Func<bool> beginEdit)
+        private static bool TryEnter(uint process)
+        {
+            // UndoRecord is shared by documents in a Word process, but a hung instance
+            // must not hold a separate Word process's edit slot.
+            lock (running) return running.Count < 8 && running.Add(process);
+        }
+
+        private static void Leave(uint process)
+        {
+            lock (running) running.Remove(process);
+        }
+
+        private static string Insert(Target target, Pair pair, Func<bool> beginEdit, Func<bool> canContinue)
         {
             var dispatch = new Guid("00020400-0000-0000-C000-000000000046");
             object model;
@@ -80,8 +98,9 @@ namespace PairTap
             if (string.IsNullOrEmpty(selected)) return Wrap.NoSelection;
 
             // Word counts the two-character end-of-cell marker as one range position.
-            int end = selected.EndsWith("\r\a", StringComparison.Ordinal) || selected.EndsWith("\r", StringComparison.Ordinal)
-                ? selectionEnd - 1 : selectionEnd;
+            int markerLength = selected.EndsWith("\r\a", StringComparison.Ordinal) ? 2 :
+                selected.EndsWith("\r", StringComparison.Ordinal) ? 1 : 0;
+            int end = markerLength == 0 ? selectionEnd : selectionEnd - 1;
             if (start >= end) return Wrap.NoSelection;
 
             dynamic left = range.Duplicate;
@@ -107,35 +126,78 @@ namespace PairTap
                 return "Word 输入焦点已变化，请重试。";
 
             undo.StartCustomRecord("对符输入");
-            bool rightInserted = false;
+            bool rightAttempted = false, leftAttempted = false;
             try
             {
-                if (!target.IsCurrent || Native.ModifiersDown)
+                if (!canContinue() || !target.IsCurrent || Native.ModifiersDown)
                     return "Word 输入焦点已变化，请重试。";
+                rightAttempted = true;
                 right.InsertBefore(pair.Right);
-                rightInserted = true;
+                if (!canContinue() || !target.IsCurrent || Native.ModifiersDown)
+                    throw new InvalidOperationException("Word editing was interrupted between the two insertions.");
+                leftAttempted = true;
                 left.InsertBefore(pair.Left);
             }
-            catch
+            catch (Exception error)
             {
-                // Remove only the delimiter inserted by this operation if the other boundary rejected the edit.
-                if (rightInserted && string.Equals((string)right.Text, pair.Right, StringComparison.Ordinal))
-                    right.Delete();
-                throw;
+                if (!rightAttempted) throw;
+                Diagnostics.Failure("word_insert", error);
+                InterruptedEdit outcome;
+                try
+                {
+                    outcome = RecoverInterruptedEdit(range, left, right, start, end,
+                        selected.Substring(0, selected.Length - markerLength), pair, leftAttempted);
+                }
+                catch (Exception recoveryError)
+                {
+                    Diagnostics.Failure("word_rollback", recoveryError);
+                    outcome = InterruptedEdit.Unconfirmed;
+                }
+                if (outcome == InterruptedEdit.Reverted) return "Word 无法完成两侧标点，已撤回右侧标点。";
+                if (outcome != InterruptedEdit.Completed) return "Word 未能确认写入结果，请检查原文档。";
             }
             finally { undo.EndCustomRecord(); }
 
-            if (target.IsCurrent)
+            if (canContinue() && target.IsCurrent)
             {
                 // Word can shift range positions while tracking insertions.
                 try
                 {
                     right.Collapse(0);
-                    right.Select();
+                    if (canContinue() && target.IsCurrent) right.Select();
                 }
                 catch (COMException error) { Diagnostics.Failure("word_caret", error); }
             }
             return null;
+        }
+
+        private static InterruptedEdit RecoverInterruptedEdit(dynamic originalRange, dynamic left, dynamic right,
+            int start, int end, string original, Pair pair, bool leftAttempted)
+        {
+            // The duplicated Word ranges expand on insertion. Require both the tracked
+            // boundary and the unchanged surrounding selection before editing in recovery.
+            dynamic probe = originalRange.Duplicate;
+            int shiftedEnd = end + pair.Left.Length;
+            if (leftAttempted && MatchesInsertedRange(left, start, pair.Left) &&
+                MatchesInsertedRange(right, shiftedEnd, pair.Right))
+            {
+                probe.SetRange(start, shiftedEnd + pair.Right.Length);
+                return string.Equals((string)probe.Text, pair.Left + original + pair.Right, StringComparison.Ordinal)
+                    ? InterruptedEdit.Completed : InterruptedEdit.Unconfirmed;
+            }
+
+            probe.SetRange(start, end);
+            if (!string.Equals((string)probe.Text, original, StringComparison.Ordinal) ||
+                !MatchesInsertedRange(right, end, pair.Right)) return InterruptedEdit.Unconfirmed;
+            right.Delete();
+            return (int)right.Start == end && (int)right.End == end ?
+                InterruptedEdit.Reverted : InterruptedEdit.Unconfirmed;
+        }
+
+        private static bool MatchesInsertedRange(dynamic range, int start, string delimiter)
+        {
+            return (int)range.Start == start && (int)range.End == start + delimiter.Length &&
+                string.Equals((string)range.Text, delimiter, StringComparison.Ordinal);
         }
 
         private static bool LockedControl(dynamic boundary)

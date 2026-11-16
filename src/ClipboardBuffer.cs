@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace PairTap
@@ -59,7 +60,9 @@ namespace PairTap
         internal const uint UnicodeFormat = 13;
         private const int TextLimit = 2 * 1024 * 1024;
         private const ulong SnapshotLimit = 128 * 1024 * 1024;
+        private static readonly int[] RestoreDelays = { 0, 25, 75, 150 };
         private static readonly uint ExcludeFromHistory = RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
+        private static int readRunning;
 
         private readonly List<Entry> entries = new List<Entry>();
         private readonly IntPtr owner;
@@ -81,9 +84,53 @@ namespace PairTap
 
         internal ClipboardBuffer(IntPtr owner) { this.owner = owner; }
 
-        internal Task Capture() { return Task.Run((Action)CaptureCore); }
+        internal Task Capture() { return Task.Run(() => CaptureCore(null)); }
 
-        private void CaptureCore()
+        internal static Task<ClipboardBuffer> CaptureForWrap(IntPtr owner)
+        {
+            var backup = new ClipboardBuffer(owner);
+            return CaptureBounded(backup, backup.CaptureCore);
+        }
+
+        private static Task<ClipboardBuffer> CaptureBounded(ClipboardBuffer backup, Action<Task> read)
+        {
+            return ReadBounded(deadline =>
+            {
+                try { read(deadline); return backup; }
+                catch { backup.Dispose(); throw; }
+            }, lateBackup => lateBackup.Dispose());
+        }
+
+        private static async Task<T> ReadBounded<T>(Func<Task, T> read, Action<T> discard)
+        {
+            if (Interlocked.CompareExchange(ref readRunning, 1, 0) != 0)
+                throw new InvalidOperationException("上一次剪贴板读取尚未结束。");
+            Task deadline = Task.Delay(1000);
+            Task<T> work = Task.Run(() => read(deadline));
+            if (await Task.WhenAny(work, deadline).ConfigureAwait(false) != work)
+            {
+                ReleaseAfterRead(work, discard);
+                throw new InvalidOperationException("剪贴板内容读取超时。");
+            }
+            try { return await work.ConfigureAwait(false); }
+            finally { Volatile.Write(ref readRunning, 0); }
+        }
+
+        private static void ReleaseAfterRead<T>(Task<T> work, Action<T> discard)
+        {
+            // Windows can still be rendering data after the caller's timeout.
+            work.ContinueWith(completed =>
+            {
+                try
+                {
+                    if (completed.IsFaulted) Diagnostics.Failure("clipboard_read", completed.Exception.GetBaseException());
+                    else if (completed.Status == TaskStatus.RanToCompletion && discard != null) discard(completed.Result);
+                }
+                finally { Volatile.Write(ref readRunning, 0); }
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
+        private void CaptureCore(Task deadline)
         {
             if (!Open(IntPtr.Zero)) throw new InvalidOperationException("剪贴板正在使用，请重试。");
             try
@@ -91,14 +138,15 @@ namespace PairTap
                 uint format = 0;
                 ulong bytes = 0;
                 var name = new StringBuilder(256);
-                while (true)
+                while (deadline == null || !deadline.IsCompleted)
                 {
                     SetLastError(0);
                     format = EnumClipboardFormats(format);
                     if (format == 0)
                     {
                         if (Marshal.GetLastWin32Error() != 0) throw new Win32Exception();
-                        break;
+                        Original = ClipboardStamp.Current;
+                        return;
                     }
 
                     string formatName = format >= 0xC000 && GetClipboardFormatName(format, name, name.Capacity) > 0
@@ -123,7 +171,7 @@ namespace PairTap
 
                     entries.Add(new Entry { Format = format, Handle = duplicate });
                 }
-                Original = ClipboardStamp.Current;
+                throw new InvalidOperationException("剪贴板内容读取超时。");
             }
             finally { CloseClipboard(); }
         }
@@ -135,21 +183,51 @@ namespace PairTap
 
         internal RestoreResult RestoreIfCurrent(ClipboardStamp expected, bool ownsPaste)
         {
+            return RestoreIfCurrent(expected, ownsPaste, SetClipboardData);
+        }
+
+        private RestoreResult RestoreIfCurrent(ClipboardStamp expected, bool ownsPaste,
+            Func<uint, IntPtr, IntPtr> publish)
+        {
             if (!Matches(expected, ownsPaste)) return RestoreResult.Changed;
-            if (!Open(owner)) return Matches(expected, ownsPaste) ? RestoreResult.Failed : RestoreResult.Changed;
+            if (!Open(owner, 40)) return Matches(expected, ownsPaste) ? RestoreResult.Failed : RestoreResult.Changed;
             try
             {
                 if (!Matches(expected, ownsPaste)) return RestoreResult.Changed;
                 if (!EmptyClipboard()) return RestoreResult.Failed;
+                if (RestoreFormats(publish)) return RestoreResult.Restored;
+            }
+            finally { CloseClipboard(); }
+
+            // Closing can synthesize a text format and advance the sequence. Only this
+            // private owner can still publish into the partial restore; a new copy takes ownership.
+            Thread.Sleep(150);
+            if (GetClipboardOwner() != owner) return RestoreResult.Changed;
+            if (!Open(owner)) return GetClipboardOwner() == owner ? RestoreResult.Failed : RestoreResult.Changed;
+            try
+            {
+                if (GetClipboardOwner() != owner) return RestoreResult.Changed;
+                return RestoreFormats(publish) ? RestoreResult.Restored : RestoreResult.Failed;
+            }
+            finally { CloseClipboard(); }
+        }
+
+        private bool RestoreFormats(Func<uint, IntPtr, IntPtr> publish)
+        {
+            // Keep the clipboard open during these short retries so a newer copy cannot be overwritten.
+            foreach (int delay in RestoreDelays)
+            {
+                if (delay != 0) Thread.Sleep(delay);
                 bool restored = true;
                 foreach (Entry entry in entries)
                 {
-                    if (SetClipboardData(entry.Format, entry.Handle) != IntPtr.Zero) entry.Handle = IntPtr.Zero;
+                    if (entry.Handle == IntPtr.Zero) continue;
+                    if (publish(entry.Format, entry.Handle) != IntPtr.Zero) entry.Handle = IntPtr.Zero;
                     else restored = false;
                 }
-                return restored ? RestoreResult.Restored : RestoreResult.Failed;
+                if (restored) return true;
             }
-            finally { CloseClipboard(); }
+            return false;
         }
 
         private bool Matches(ClipboardStamp expected, bool ownsPaste)
@@ -157,12 +235,12 @@ namespace PairTap
             return ownsPaste ? GetClipboardOwner() == owner : expected.IsCurrent;
         }
 
-        private static bool Open(IntPtr window)
+        private static bool Open(IntPtr window, int attempts = 12)
         {
-            for (int i = 0; i < 12; i++)
+            for (int i = 0; i < attempts; i++)
             {
                 if (OpenClipboard(window)) return true;
-                System.Threading.Thread.Sleep(15);
+                Thread.Sleep(15);
             }
             return false;
         }
@@ -194,13 +272,19 @@ namespace PairTap
 
         internal static string ReadSelection(ClipboardStamp copied, bool allowSameOwnerUpdate, out ClipboardStamp read)
         {
+            return ReadSelectionCore(copied, allowSameOwnerUpdate, null, out read);
+        }
+
+        private static string ReadSelectionCore(ClipboardStamp copied, bool allowSameOwnerUpdate, Task deadline, out ClipboardStamp read)
+        {
             read = copied;
-            if (!Open(IntPtr.Zero)) return null;
+            if (deadline != null && deadline.IsCompleted || !Open(IntPtr.Zero)) return null;
             try
             {
                 ClipboardStamp current = ClipboardStamp.Current;
                 if (current.Owner != copied.Owner || (current.Sequence != copied.Sequence && !allowSameOwnerUpdate))
                     return null;
+                if (deadline != null && deadline.IsCompleted) return null;
                 IntPtr data = GetClipboardData(UnicodeFormat);
                 read = ClipboardStamp.Current;
                 if (data == IntPtr.Zero || read.Owner != copied.Owner) return null;
@@ -219,6 +303,16 @@ namespace PairTap
             finally { CloseClipboard(); }
         }
 
+        internal static Task<Tuple<string, ClipboardStamp>> ReadSelectionBounded(ClipboardStamp copied, bool allowSameOwnerUpdate)
+        {
+            return ReadBounded(deadline =>
+            {
+                ClipboardStamp read;
+                string text = ReadSelectionCore(copied, allowSameOwnerUpdate, deadline, out read);
+                return Tuple.Create(text, read);
+            }, null);
+        }
+
         internal static Task<bool> PreparePaste(Target target, string text, ClipboardChannel channel)
         {
             IntPtr unicode = Allocate(checked((text.Length + 1) * 2));
@@ -235,8 +329,9 @@ namespace PairTap
             finally { Free(unicode); }
         }
 
-        internal bool StagePaste(ClipboardStamp expected, Target target)
+        internal bool StagePaste(ClipboardStamp expected, Target target, out bool changed)
         {
+            changed = false;
             IntPtr marker = Allocate(sizeof(int));
             try
             {
@@ -244,6 +339,7 @@ namespace PairTap
                 try
                 {
                     if (!expected.IsCurrent || !target.IsCurrent || Native.ModifiersDown || !EmptyClipboard()) return false;
+                    changed = true;
                     if (ExcludeFromHistory == 0 || SetClipboardData(ExcludeFromHistory, marker) == IntPtr.Zero) return false;
                     marker = IntPtr.Zero;
                     SetClipboardData(UnicodeFormat, IntPtr.Zero);

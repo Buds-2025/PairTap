@@ -318,7 +318,8 @@ namespace PairTap
             busy = true;
             var elapsed = Stopwatch.StartNew();
             string control = Native.ClassName(target.Focus);
-            string context = "wrap pid=" + target.ProcessId + " control=" + control + " pair=" + pair.Name;
+            string context = "wrap pid=" + target.ProcessId + " app=" + AppName(target.ProcessId) +
+                " control=" + control + " pair=" + pair.Name;
             try
             {
                 if (returningFromPalette)
@@ -327,13 +328,25 @@ namespace PairTap
                         await Task.Delay(20);
                 }
                 string message = await Wrap.Apply(target, pair, clipboard);
-                Diagnostics.Write(context + " ms=" + elapsed.ElapsedMilliseconds + " result=" + (message ?? "ok"));
+                Diagnostics.Write(context + " backend=" + target.Backend + " stage=" + target.Stage +
+                    " ms=" + elapsed.ElapsedMilliseconds + " result=" + (message ?? "ok"));
                 if (message != null && message != Wrap.NoSelection) Notify(message);
             }
             catch (InvalidOperationException error) { Diagnostics.Failure(context, error); Notify(error.Message); }
             catch (ExternalException error) { Diagnostics.Failure(context, error); Notify("当前窗口或剪贴板暂时不可用，请重新选中后重试。"); }
             catch (Exception error) { Diagnostics.Failure(context, error); Notify("这个选区暂时无法处理。请选中普通文字后重试。"); }
             finally { FinishOperation(); }
+        }
+
+        private static string AppName(uint processId)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById((int)processId)) return process.ProcessName;
+            }
+            catch (ArgumentException) { return "unknown"; }
+            catch (InvalidOperationException) { return "unknown"; }
+            catch (System.ComponentModel.Win32Exception) { return "unknown"; }
         }
 
         private void RequestExit()

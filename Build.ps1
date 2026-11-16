@@ -1,10 +1,10 @@
+param([string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist'))
 $ErrorActionPreference = 'Stop'
 
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $compiler = Join-Path $framework 'csc.exe'
-$dist = Join-Path $PSScriptRoot 'dist'
-New-Item -ItemType Directory -Path $dist -Force | Out-Null
-$app = Join-Path $dist 'PairTap.exe'
+New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+$app = Join-Path (Resolve-Path -LiteralPath $OutputDirectory).Path 'PairTap.exe'
 $icon = Join-Path $PSScriptRoot 'assets\PairTap.ico'
 $qr = Join-Path $PSScriptRoot 'assets\bilibili-qr.png'
 $manifest = Join-Path $PSScriptRoot 'assets\PairTap.manifest'
